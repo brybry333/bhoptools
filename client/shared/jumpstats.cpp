@@ -3,10 +3,12 @@
 // ground prestrafe trainer of bhop-get-stats branch sj-beta when the plugin says so. Float math is kept in float, as
 // SourcePawn does it, so the numbers come out the same.
 #include "jumpstats.h"
+#include "hexparse.h"
 #include "speedo.h"
 #include "teleport_predict.h"
 #include "engine_trace_layout.h"
 #include "hudkeys.h"
+#include "options_tab.h"
 #include "game_layout.h"
 #include "settings.h"
 #include "utils.h"
@@ -914,11 +916,28 @@ void ShowKeys(int buttons, float yaw)
 	if (!update) return;
 
 	if (Has(SHOWKEYS_ENABLED)) {
-		// hudkeys' layouts 2 and 3 are these two
-		const std::string text = hudkeys::Format(Has(SHOWKEYS_SIMPLE) ? 3 : 2, buttons, yawDiff);
-		static const int white[3] = { 255, 255, 255 };
-		if (Has(SHOWKEYS_UNRELIABLE)) CenterText(text);
-		else ShowHud(HudShowKeys, white, 0.65f, 3, text);
+		// shavit-hud's centre keys, as its FillCenterKeys writes them (kClientJumpstats12): on Windows its
+		// fullwidth layout, or jumpstats' simple one; on Linux, whose font lacks the fullwidth letters, its
+		// plain one. At the default position they're real centre text, the game's own font and place; moved,
+		// the overlay draws the same text there. The overlay keeps the last text and hides it a second after
+		// updates stop, which they do at least every MIN_UPDATE_RATE.
+#ifdef _WIN32
+		const int layout = Has(SHOWKEYS_SIMPLE) ? 3 : 0;
+#else
+		const int layout = 1;
+#endif
+		const std::string text = hudkeys::Format(layout, buttons, yawDiff);
+		const float x = HudCoord(HudShowKeys, 0), y = HudCoord(HudShowKeys, 1);
+		if (x < 0.0f && y < 0.0f) {
+			options::ClearKeys();
+			CenterText(text);
+		}
+		else {
+			options::SetKeys(text, x, y);
+		}
+	}
+	else {
+		options::ClearKeys();
 	}
 	g_keysDelayed = false;
 	g_keysCmd = 0;
@@ -1140,14 +1159,6 @@ bool OurSession(const CCommandX& c, int minArgs)
 	return c.argc >= minArgs && atoi(c.argv[1]) == g_session && g_session != 0;
 }
 
-int HexDigit(char c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
 }  // namespace
 
 void Reset(int session)
@@ -1179,7 +1190,7 @@ void Cmd_Settings(const CCommandX& c)
 	if (!g_on || c.argc < 4 + 6 + Bools2) return;
 	g_cvars = atoi(c.argv[3]);
 	for (int i = 0; i < 6; ++i) g_channels[i] = atoi(c.argv[4 + i]);
-	auto hex = [&](int arg) { return arg < c.argc ? (int)(uint32_t)strtoul(c.argv[arg], nullptr, 16) : 0; };
+	auto hex = [&](int arg) { return arg < c.argc ? (int)ParseHexBits(c.argv[arg]) : 0; };
 	for (int i = 0; i < kSentSettings; ++i) g_set[i] = hex(10 + i);
 	const int after = 10 + kSentSettings + 3;
 	g_ownShowYaws = c.argc >= after + 2;
@@ -1189,7 +1200,7 @@ void Cmd_Settings(const CCommandX& c)
 	if (!g_haveMoveCvars) return;
 	float* cvars[3] = { &g_accelerate, &g_friction, &g_stopspeed };
 	for (int i = 0; i < 3; ++i) {
-		const uint32_t bits = (uint32_t)strtoul(c.argv[10 + kSentSettings + i], nullptr, 16);
+		const uint32_t bits = ParseHexBits(c.argv[10 + kSentSettings + i]);
 		memcpy(cvars[i], &bits, 4);
 	}
 }
@@ -1225,7 +1236,7 @@ void Cmd_Comparison(const CCommandX& c)
 {
 	if (!OurSession(c, 4)) return;
 	g_hasComparison = atoi(c.argv[2]) != 0;
-	const uint32_t bits = (uint32_t)strtoul(c.argv[3], nullptr, 16);
+	const uint32_t bits = ParseHexBits(c.argv[3]);
 	memcpy(&g_comparison, &bits, 4);
 }
 
@@ -1242,7 +1253,7 @@ void Cmd_Jump(const CCommandX& c)
 void Cmd_Time(const CCommandX& c)
 {
 	if (!OurSession(c, 5)) return;
-	uint32_t bits[2] = { (uint32_t)strtoul(c.argv[3], nullptr, 16), (uint32_t)strtoul(c.argv[4], nullptr, 16) };
+	uint32_t bits[2] = { ParseHexBits(c.argv[3]), ParseHexBits(c.argv[4]) };
 	float f[2];
 	memcpy(f, bits, sizeof(f));
 	g_timeCmd = atoi(c.argv[2]);

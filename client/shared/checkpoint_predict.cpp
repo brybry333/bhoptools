@@ -1,7 +1,9 @@
 #include "checkpoint_predict.h"
+#include "hexparse.h"
 #include "teleport_predict.h"
 #include "utils.h"
 #include "datamap.h"
+#include "player_fields.h"
 #include "sigs.h"
 #include "game_layout.h"
 #include "speedo.h"
@@ -12,6 +14,7 @@
 #include "style_keys.h"
 #include "autosync.h"
 #include "jumpstats.h"
+#include "options_tab.h"
 #include "settings.h"
 
 #include <climits>
@@ -83,6 +86,10 @@ const int kClientJumpstats8 = 1 << 27;  // linear gain
 const int kClientJumpstats9 = 1 << 28;  // the slow ticks HUD
 const int kClientJumpstats10 = 1 << 29; // ShowYaws at its own position and channel group
 const int kClientJumpstats11 = 1 << 30; // "both" gain is old / linear
+const int kClientJumpstats12 = 1 << 19; // our own showkeys: drawn with our font at their HUD position (options::SetKeys)
+// Every jumpstats capability: sent together, and taken back together by "clientside hud fixes" off.
+const int kClientJumpstatsAll = kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5
+	| kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientJumpstats10 | kClientJumpstats11 | kClientJumpstats12;
 const int kClientHold = 1 << 20;
 const int kMenuKeySave = 1 << 0;     // bhoptools_menu keys
 const int kMenuKeyTele = 1 << 1;
@@ -182,17 +189,10 @@ int    g_helloTries;
 bool   g_helloWanted;
 int    g_helloSent = -1;
 bool   g_caps;           // this session has a protocol-2 server
-// Raw mouse totals for the server's cheat detection: off until it's agreed on, whatever the server asks.
-const bool kSendFrames = false;
-bool   g_framesOn;
-int64_t g_inputX, g_inputY;
-const int kFrameBatch = 8;
-int    g_frameFirst, g_frameCount;
-int32_t g_frameX[kFrameBatch], g_frameY[kFrameBatch];
 int    g_capsCmd;        // saves after this command get acked
 int    g_serverFlags;
 bool   g_lastKz;
-int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientJumpstats10 | kClientJumpstats11 | kClientHold;
+int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstatsAll | kClientHold;
 NcLog  g_noclip;
 int    g_noclipAllow = NC_ALLOW_ALL;
 // Servers without bhoptools_cpset restore both.
@@ -258,8 +258,6 @@ double g_menuSaveAt = -1;
 // When a checkpoint menu drawn before the server ran a key we predicted was kept off the screen, -1 for none.
 double g_menuHeldAt = -1;
 
-speedo::DispatchUserMessageFn g_dispatch;
-void*  g_client;
 int    g_chatClient;
 int    g_chatMsg = -1;
 
@@ -317,28 +315,9 @@ void (*g_sayFn[2])(const CCommandX&);
 
 int ArgInt(const CCommandX& c, int i) { return i < c.argc ? atoi(c.argv[i]) : 0; }
 
-uint32_t ArgHexBits(const CCommandX& c, int i)
-{
-	const char* s = i < c.argc ? c.argv[i] : "0";
-	const bool neg = *s == '-';
-#ifdef _WIN32
-	uint32_t bits = (uint32_t)strtoul(neg ? s + 1 : s, nullptr, 16);
-#else
-	// Not strtoul: glibc 2.38 headers redirect it to __isoc23_strtoul.
-	uintptr_t v;
-	ParseHex(neg ? s + 1 : s, &v);
-	uint32_t bits = (uint32_t)v;
-#endif
-	return neg ? 0u - bits : bits;  // SourcePawn's %x of a negative cell
-}
+uint32_t ArgHexBits(const CCommandX& c, int i) { return ParseHexBits(i < c.argc ? c.argv[i] : "0"); }
 
-float ArgHexFloat(const CCommandX& c, int i)
-{
-	const uint32_t bits = ArgHexBits(c, i);
-	float f;
-	memcpy(&f, &bits, 4);
-	return std::isfinite(f) && fabsf(f) < 1e6f ? f : 0.0f;
-}
+float ArgHexFloat(const CCommandX& c, int i) { return HexFloatSetting(i < c.argc ? c.argv[i] : "0"); }
 
 Slot* FindSlot(int key)
 {
@@ -400,7 +379,6 @@ void ResetSession()
 {
 	g_hold = Hold();
 	g_holdArmed = false;
-	g_framesOn = false;
 	SetEventQueueFixIfChanged(false);
 	RngSettings rng = g_rng;
 	rng.known = false;
@@ -499,7 +477,6 @@ void Cmd_Caps(const CCommandX& c)
 	// Older protocols aren't predicted.
 	if (ArgInt(c, 1) < 2) {
 		g_caps = false;
-		g_framesOn = false;
 		g_hold = Hold();
 		g_holdArmed = false;
 		SetEventQueueFixIfChanged(false);
@@ -882,14 +859,6 @@ void Cmd_Msf(const CCommandX& c)
 	msf::SetSettings(s, true);
 }
 
-int HexDigit(char c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
 // They name our commands by number, so the sim's snapshots have to be keyed the same way.
 bool SyncMessage(const CCommandX& c, int minArgs)
 {
@@ -994,19 +963,17 @@ void Cmd_Chat(const CCommandX& c)
 // The same bytes as Shavit_PrintToChat's SayText2.
 void PrintChat(const char* text, int len)
 {
-	unsigned char buf[264] = {};  // zero padded: bf_read reads whole dwords
+	unsigned char buf[256] = {};
 	buf[0] = (unsigned char)g_chatClient;
 	buf[1] = 1;
 	if (len > 252) len = 252;
 	memcpy(buf + 2, text, len);
-	len += 3;
-	BfRead msg = { buf, len, len * 8, 0, false, false, "bhoptools" };
-	g_dispatch(g_client, g_chatMsg, &msg);
+	speedo::Dispatch(g_chatMsg, buf, len + 3);
 }
 
 void PrintSaved(int key)
 {
-	if (!g_dispatch || g_chatMsg < 0 || !g_chat.Ready()) return;
+	if (!speedo::CanDispatch() || g_chatMsg < 0 || !g_chat.Ready()) return;
 	const char* at = strstr(g_chat.text, kChatNumber);
 	if (!at) return;
 
@@ -1093,18 +1060,16 @@ bool ItemNumber(int line, bool enabled, int n, int* at, int* len, int* other)
 void SendMenu(const char* text, int len, int keys)
 {
 	const int id = speedo::WatchedMessage();
-	if (!g_dispatch || id < 0 || len <= 0) return;
+	if (!speedo::CanDispatch() || id < 0 || len <= 0) return;
 	for (int off = 0; off < len; ) {
 		const int part = len - off > 240 ? 240 : len - off;
-		unsigned char buf[264] = {};  // zero padded: bf_read reads whole dwords
+		unsigned char buf[248] = {};
 		buf[0] = (unsigned char)(keys & 0xff);
 		buf[1] = (unsigned char)(keys >> 8);
 		buf[2] = (unsigned char)g_menuTime;
 		buf[3] = off + part < len ? 1 : 0;
 		memcpy(buf + 4, text + off, part);
-		const int bytes = part + 5;
-		BfRead msg = { buf, bytes, bytes * 8, 0, false, false, "bhoptools" };
-		g_dispatch(g_client, id, &msg);
+		speedo::Dispatch(id, buf, part + 5);
 		off += part;
 	}
 	if (text != g_shown) memcpy(g_shown, text, len);
@@ -1115,7 +1080,7 @@ void SendMenu(const char* text, int len, int keys)
 bool RedrawMenu(bool force)
 {
 	const int id = speedo::WatchedMessage();
-	if (!g_menuBaseOk || !g_cpMenu || g_menuMore || !g_cmdKeys || !g_dispatch || id < 0) return false;
+	if (!g_menuBaseOk || !g_cpMenu || g_menuMore || !g_cmdKeys || !speedo::CanDispatch() || id < 0) return false;
 	int cur = g_menuCur, total = g_menuTotal, saves = 0;
 	for (int i = 0; i < g_slotCount; ++i) {
 		const Slot& s = g_slots[i];
@@ -1438,22 +1403,9 @@ void Say(const CCommandX& c, int i)
 	else ForwardToServer(c);
 }
 
-void FlushFrames()
-{
-	if (g_frameCount && g_framesOn && g_engine) {
-		char line[320];
-		int n = snprintf(line, sizeof(line), "bhoptools_frame %d %d", g_session, g_frameFirst);
-		for (int i = 0; i < g_frameCount; ++i)
-			n += snprintf(line + n, sizeof(line) - n, " %d %d", g_frameX[i], g_frameY[i]);
-		VFunc<void (*)(void*, const char*, bool)>(g_engine, VT_IVEngineClient_ServerCmd)(g_engine, line, false);
-	}
-	g_frameCount = 0;
-}
-
-void Cmd_Frames(const CCommandX& c)
-{
-	if (kSendFrames && g_session && ArgInt(c, 1) == g_session) g_framesOn = ArgInt(c, 2) != 0;
-}
+// The server asks for raw mouse totals with this. They were never sent (the switch was a constant
+// false until that's agreed on), so the collecting is gone; the command stays so the ask lands quietly.
+void Cmd_Frames(const CCommandX&) {}
 
 void Cmd_Say(const CCommandX& c) { Say(c, 0); }
 void Cmd_SayTeam(const CCommandX& c) { Say(c, 1); }
@@ -1596,7 +1548,9 @@ int CommandKey(void* player, void* mv)
 int HelloFlags()
 {
 	int flags = g_on ? g_clientFlags : g_clientFlags & ~kClientTriggers;
-	if (!settings::Get().speedo) flags &= ~(kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientJumpstats10 | kClientJumpstats11);
+	if (!settings::Get().speedo) flags &= ~kClientJumpstatsAll;
+	// Without the overlay hook nobody would draw the showkeys; the server keeps them
+	if (!options::KeysOverlay()) flags &= ~kClientJumpstats12;
 	return flags;
 }
 
@@ -2023,7 +1977,7 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		m.maxSpeed = Field<float>(mv, MV_MaxSpeed);
 		m.lagged = lagged ? *lagged : 1.0f;
 		m.surfaceFriction = TeleportPredict_SurfaceFriction(player);
-		m.stamina = TeleportPredict_Stamina(player);
+		m.stamina = Field<float>(player, g_off.stamina);
 		js::PreMove(m);
 	}
 
@@ -2071,49 +2025,34 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 
 bool ResolveOffsets()
 {
-	using namespace dm;
-	FieldReq req[] = {
-		{ "m_nTickBase",       FIELD_INTEGER,   4,  {}, 0, -1 },
-		{ "m_fFlags",          FIELD_INTEGER,   4,  {}, 0, -1 },
-		{ "m_flStamina",       FIELD_FLOAT,     4,  {}, 0, -1 },
-		{ "m_Local",           FIELD_EMBEDDED,  -1, {}, 0, -1 },
-		{ "m_bDucked",         FIELD_BOOLEAN,   1,  {}, 0, -1 },
-		{ "m_bDucking",        FIELD_BOOLEAN,   1,  {}, 0, -1 },
-		{ "m_flDucktime",      FIELD_FLOAT,     4,  {}, 0, -1 },
-		{ "m_vecBaseVelocity", FIELD_VECTOR,    12, {}, 0, -1 },
-		{ "m_vecVelocity",     FIELD_VECTOR,    12, {}, 0, -1 },
-		{ "m_lifeState",       FIELD_CHARACTER, 1,  {}, 0, -1 },
-		{ "m_MoveType",        FIELD_CHARACTER, 1,  {}, 0, -1 },
-		{ "m_flGravity",       FIELD_FLOAT,     4,  {}, 0, -1 },
-		{ "m_vecAbsVelocity",  FIELD_VECTOR,    12, {}, 0, -1 },
-	};
-	const int n = sizeof(req) / sizeof(req[0]);
-
 	const std::vector<MemRange> segs = ModuleDataRanges(CLIENT_MODULE);
 	if (segs.empty()) return false;
-	ResolveFields(segs, req, n);
+	const pf::Offsets f = pf::Resolve(segs);
 
-	for (int i = 0; i < n; ++i) {
-		if (req[i].offset < 0) {
-			g_offsetError = req[i].name;
+	// All required, in the order the first missing one is reported.
+	static const pf::Field kNeed[] = { pf::TickBase, pf::Flags, pf::Stamina, pf::Local, pf::Ducked, pf::Ducking, pf::Ducktime,
+		pf::BaseVelocity, pf::Velocity, pf::LifeState, pf::MoveType, pf::Gravity, pf::AbsVelocity };
+	for (pf::Field need : kNeed) {
+		if (f[need] < 0) {
+			g_offsetError = pf::Name(need);
 			return false;
 		}
 	}
 
 	// m_bDucked and friends are CPlayerLocalData members, relative to m_Local.
-	const int local = req[3].offset;
-	g_off.tickbase     = req[0].offset;
-	g_off.flags        = req[1].offset;
-	g_off.stamina      = req[2].offset;
-	g_off.ducked       = local + req[4].offset;
-	g_off.ducking      = local + req[5].offset;
-	g_off.ducktime     = local + req[6].offset;
-	g_off.baseVelocity = req[7].offset;
-	g_off.velocity     = req[8].offset;
-	g_off.lifeState    = req[9].offset;
-	g_off.moveType     = req[10].offset;
-	g_off.gravity      = req[11].offset;
-	g_off.absVelocity  = req[12].offset;
+	const int local = f[pf::Local];
+	g_off.tickbase     = f[pf::TickBase];
+	g_off.flags        = f[pf::Flags];
+	g_off.stamina      = f[pf::Stamina];
+	g_off.ducked       = local + f[pf::Ducked];
+	g_off.ducking      = local + f[pf::Ducking];
+	g_off.ducktime     = local + f[pf::Ducktime];
+	g_off.baseVelocity = f[pf::BaseVelocity];
+	g_off.velocity     = f[pf::Velocity];
+	g_off.lifeState    = f[pf::LifeState];
+	g_off.moveType     = f[pf::MoveType];
+	g_off.gravity      = f[pf::Gravity];
+	g_off.absVelocity  = f[pf::AbsVelocity];
 
 	const uintptr_t store = FindPatternIn(CLIENT_MODULE, SIG_StartCommandStore);
 	g_off.currentCommand = store ? *reinterpret_cast<const int*>(store + OFF_StartCommandStore_Disp) : 0;
@@ -2138,8 +2077,6 @@ bool Attach()
 	if (!movement || !g_engine) return false;
 	g_engineSound = CreateInterfaceIn(ENGINE_MODULE, "IEngineSoundClient003");
 
-	g_client = CreateInterfaceIn(CLIENT_MODULE, "VClient017");
-	g_dispatch = speedo::OriginalDispatch();
 	speedo::Watch("ShowMenu", OnShowMenu);
 
 #ifndef _WIN32
@@ -2208,21 +2145,6 @@ void PrintState()
 		g_serverFlags & kServerAutosync ? ", autosync" : "",
 		g_menuSelect ? ", menu" : "",
 		runspeed, kLandfix[m.landfix], m.easybhop ? 1 : 0, momsurffix, g_restore);
-}
-
-void AddInput(float dx, float dy)
-{
-	g_inputX += lroundf(dx);
-	g_inputY += lroundf(dy);
-}
-
-void OnCreateMove(int sequence)
-{
-	if (g_frameCount && sequence != g_frameFirst + g_frameCount) FlushFrames();
-	if (!g_frameCount) g_frameFirst = sequence;
-	g_frameX[g_frameCount] = (int32_t)(uint32_t)g_inputX;
-	g_frameY[g_frameCount] = (int32_t)(uint32_t)g_inputY;
-	if (++g_frameCount == kFrameBatch) FlushFrames();
 }
 
 }  // namespace cp

@@ -18,7 +18,5 @@ void SetTriggerPrediction(bool on);
 
 void PrintState();
 
-void AddInput(float dx, float dy);
-void OnCreateMove(int sequence);
 
 }

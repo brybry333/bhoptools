@@ -93,6 +93,14 @@
     <ClInclude Include="..\shared\settings.h" />
     <ClInclude Include="..\shared\options_tab.h" />
     <ClInclude Include="..\shared\spectate.h" />
+    <ClInclude Include="..\shared\client_core.h" />
+    <ClInclude Include="..\shared\self_update.h" />
+    <ClInclude Include="..\shared\file_util.h" />
+    <ClInclude Include="..\shared\frametime_floor.h" />
+    <ClInclude Include="..\shared\hexparse.h" />
+    <ClInclude Include="..\shared\cmd_log.h" />
+    <ClInclude Include="..\shared\sigscan.h" />
+    <ClInclude Include="..\shared\player_fields.h" />
     <ClInclude Include="..\shared\download_progress.h" />
     <ClInclude Include="..\shared\fastdl.h" />
     <ClInclude Include="..\shared\style_keys.h" />

@@ -8,6 +8,8 @@
 #include <vector>
 #include <Psapi.h>
 
+#include "sigscan.h"
+
 #define CLIENT_MODULE  "client.dll"
 #define ENGINE_MODULE  "engine.dll"
 #define VSTDLIB_MODULE "vstdlib.dll"
@@ -15,9 +17,6 @@
 #define GAMEUI_MODULE  "GameUI.dll"
 #define VGUI_MODULE    "vgui2.dll"
 
-#define INRANGE(x, a, b) (x >= a && x <= b)
-#define getBits(x) (INRANGE((x & (~0x20)), 'A', 'F') ? ((x & (~0x20)) - 'A' + 0xA): (INRANGE(x, '0', '9') ? x - '0': 0))
-#define getByte(x) (getBits(x[0]) << 4 | getBits(x[1]))
 
 typedef struct BASE_RELOCATION_ENTRY {
 	USHORT Offset : 12;
@@ -68,33 +67,10 @@ inline uintptr_t FindPatternIn(const char* szModule, const char* szSignature)
 	HMODULE hModule = GetModuleHandleA(szModule);
 	if (!hModule || !GetModuleInformation(GetCurrentProcess(), hModule, &modInfo, sizeof(MODULEINFO)))
 		return NULL;
-	uintptr_t startAddress = reinterpret_cast<uintptr_t>(modInfo.lpBaseOfDll);
-	uintptr_t endAddress = startAddress + modInfo.SizeOfImage;
-	const char* pat = szSignature;
-	uintptr_t firstMatch = 0;
-	for (uintptr_t pCur = startAddress; pCur < endAddress; pCur++)
-	{
-		if (!*pat) return firstMatch;
-		if (*(PBYTE)pat == '\?' || *(BYTE*)pCur == getByte(pat))
-		{
-			if (!firstMatch) firstMatch = pCur;
-			if (!pat[2]) return firstMatch;
-			if (*(PWORD)pat == '\?\?' || *(PBYTE)pat != '\?') pat += 3;
-			else pat += 2;
-		}
-		else
-		{
-			pat = szSignature;
-			firstMatch = 0;
-		}
-	}
-
-	return NULL;
-}
-
-inline float MIN(float a, float b)
-{
-	return a < b ? a : b;
+	// The whole image, as before the scanner was shared; the old byte-at-a-time matcher missed a
+	// match that began inside a partial one.
+	const uintptr_t start = reinterpret_cast<uintptr_t>(modInfo.lpBaseOfDll);
+	return ScanRange(start, start + modInfo.SizeOfImage, ParseSig(szSignature));
 }
 
 void TeleportPredict_LogLine(const char* line);
@@ -200,7 +176,12 @@ inline unsigned long long MonotonicMs()
 // The options slider polls it while it's dragged.
 inline bool LeftMouseDown() { return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0; }
 
+// QueryPerformanceCounter, like Linux's CLOCK_MONOTONIC: GetTickCount64 only moves every 15.6 ms,
+// which made the every-frame jumpstats trainer step between ticks instead of gliding.
 inline double MonotonicSeconds()
 {
-	return (double)GetTickCount64() / 1000.0;
+	static const double perSecond = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (double)f.QuadPart; }();
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	return (double)now.QuadPart / perSecond;
 }

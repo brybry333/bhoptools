@@ -151,7 +151,7 @@ jobs:
   # release_tag. It builds, writes SHA256SUMS and keeps the files as the "release" artifact.
   # Step 2: sign SHA256SUMS with the release key and run again with build_run (step 1's run id)
   # and sums_signature; that publishes step 1's files with SHA256SUMS and SHA256SUMS.sig.
-  # Clients refuse a release without a valid signature. See STAGING.md, "Promoting".
+  # Clients refuse a release without a valid signature.
   release-client:
     if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin' && inputs.sums_signature == ''
     needs: [build, build-linux]
@@ -191,7 +191,6 @@ jobs:
           jq -n --arg sha "$GITHUB_SHA" --arg version "$VERSION" --argjson prerelease "$PRERELEASE" \
             '{sha: $sha, version: $version, prerelease: $prerelease}' > release/meta.json
 
-      # staging.yml's promote writes the same body: the client shows what's above the ---.
       - name: Release notes
         run: |
           set -e
@@ -234,7 +233,7 @@ jobs:
           {
             echo "## $VERSION is built, not published"
             echo
-            echo "Sign SHA256SUMS with the release key and run step 2 (STAGING.md), in cmd.exe:"
+            echo "Sign SHA256SUMS with the release key and run step 2, in cmd.exe:"
             echo
             echo '```'
             echo "gh run download $GITHUB_RUN_ID -R $GITHUB_REPOSITORY -n release -D $d"

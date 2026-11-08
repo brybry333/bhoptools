@@ -108,7 +108,9 @@ double g_keysTime;
 std::string g_keysShown;
 
 // Registered after we attach, so looked up on first use.
-int MessageId(const char* want)
+}  // namespace
+
+int UserMessageId(const char* want)
 {
 	void* um = UserMessages();
 	if (!um) return -1;
@@ -121,16 +123,17 @@ int MessageId(const char* want)
 	return -1;
 }
 
+namespace {
+
 void Show()
 {
 	const int last = (g_next + kHistory - 1) % kHistory;
 	const int speed = g_twoD ? g_speed2d[last] : g_speed3d[last];
-	unsigned char buf[264] = {};  // zero padded: bf_read reads whole dwords
-	int len = snprintf(reinterpret_cast<char*>(buf), 255, "%s%d%s", g_before, speed, g_after);
+	char buf[256];
+	int len = snprintf(buf, sizeof(buf) - 1, "%s%d%s", g_before, speed, g_after);
 	if (len > 254) len = 254;
-	len += 1;
-	BfRead msg = { buf, len, len * 8, 0, false, false, "speedo" };
-	g_orig(g_client, g_hintMsg, &msg);
+	buf[len] = '\0';
+	Dispatch(g_hintMsg, buf, len + 1);
 }
 
 bool IsDigit(char c) { return c >= '0' && c <= '9'; }
@@ -205,13 +208,9 @@ bool OwnHud()
 void ShowKeys(const std::string& text)
 {
 	const std::string payload = hudkeys::CenterTextMsg(text);
-	unsigned char buf[264] = {};  // zero padded: bf_read reads whole dwords
 	if (payload.size() > 256) return;
-	memcpy(buf, payload.data(), payload.size());
-	const int len = (int)payload.size();
-	BfRead msg = { buf, len, len * 8, 0, false, false, "hudkeys" };
 	g_keysShown = text;
-	g_orig(g_client, g_textMsg, &msg);
+	Dispatch(g_textMsg, payload.data(), (int)payload.size());
 }
 
 // The key overlay goes out every tick with the keys of a command a ping old; it's drawn from the newest one.
@@ -303,10 +302,10 @@ bool CallOriginal(void* self, int type, BfRead* msg)
 
 bool Hooked_Dispatch(void* self, int type, BfRead* msg)
 {
-	if (g_hintMsg < 0) g_hintMsg = MessageId("HintText");
-	if (g_textMsg < 0) g_textMsg = MessageId("TextMsg");
-	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
-	if (g_watchFn && g_watchMsg < 0) g_watchMsg = MessageId(g_watchName);
+	if (g_hintMsg < 0) g_hintMsg = UserMessageId("HintText");
+	if (g_textMsg < 0) g_textMsg = UserMessageId("TextMsg");
+	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = UserMessageId("HudMsg");
+	if (g_watchFn && g_watchMsg < 0) g_watchMsg = UserMessageId(g_watchName);
 	if (msg && g_watchFn && type == g_watchMsg && g_watchFn(*msg)) return true;
 	if (msg && g_hintMsg >= 0 && type == g_hintMsg && OnHint(*msg)) return true;
 	if (msg && g_textMsg >= 0 && type == g_textMsg && OnTextMsg(*msg)) return true;
@@ -410,9 +409,9 @@ void SetEnabled(bool on)
 	g_keysLayout = -1;
 }
 
-DispatchUserMessageFn OriginalDispatch()
+bool CanDispatch()
 {
-	return g_orig;
+	return g_orig != nullptr;
 }
 
 void Watch(const char* name, bool (*fn)(const BfRead&))
@@ -427,18 +426,13 @@ int WatchedMessage()
 	return g_watchMsg;
 }
 
-int UserMessageId(const char* name)
-{
-	return MessageId(name);
-}
-
 void Dispatch(int id, const void* data, int len)
 {
 	unsigned char buf[520] = {};  // zero padded: bf_read reads whole dwords
 	if (!g_orig || !UserMessages() || id < 0 || len <= 0 || len > 512) return;
 	memcpy(buf, data, len);
 	BfRead msg = { buf, len, len * 8, 0, false, false, "bhoptools" };
-	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
+	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = UserMessageId("HudMsg");
 	CallOriginal(g_client, id, &msg);
 }
 

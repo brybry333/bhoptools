@@ -1000,17 +1000,13 @@ struct PredRuntime {
 	int  shotButton[kShots];
 	int  shotNext = 0;
 
-	bool  rngfixTelehop = true;
 	int   teleports = 0;
-	bool  telehopAir = false;
-	bool  telehopBlocked = false;
-	float telehopVelZ = 0.0f, telehopBaseVelZ = 0.0f, telehopGravity = 1.0f;
 
 	// rngfix's g_iTick: the command's tick from its ProcessMovement pre hook on, one less
 	// before it (events serviced at the start of the command).
 	int   rngTick = 0;
-	// rngfix_sim.h's PostThink, run after the touch pass and before timed events. When set
-	// it does the telehop fix itself, so the partial one below is skipped.
+	// rngfix_sim.h's PostThink, run after the touch pass and before timed events. Its telehop
+	// fix needs the tracer; without one there's no telehop fix, like the other rngfix fixes.
 	void (*postThinkHook)(void* user, PredRuntime& rt, PredPlayerIO& io) = nullptr;
 	void* postThinkUser = nullptr;
 	// FindUseEntity's trace (MASK_NPCSOLID_BRUSHONLY | MASK_OPAQUE_AND_NPCS), a box of half size
@@ -1033,9 +1029,14 @@ struct PredRuntime {
 	int                   vsSteps = 0; // script work left this command, so a hostile map can't stall a frame
 	uint32_t              stampNow = 0;
 
-	bool cpTeleportPending = false;
-	const PredCheckpointState* cpLoad = nullptr;
-	bool cpKz = false;
+	// A checkpoint teleport the next simulated command lands on; set by teleport_predict, consumed
+	// and cleared by PredPreMove.
+	struct CpRequest {
+		bool pending = false;
+		const PredCheckpointState* load = nullptr; // the state it restores, null when not saved here
+		bool kz = false;                           // kzcheckpoints: only the flags come back
+		void Clear() { *this = CpRequest(); }
+	} cp;
 	bool mpbhops = false;
 	bool stateSync = false;
 	int mpbhopsStartDoor = -1;
@@ -1044,10 +1045,15 @@ struct PredRuntime {
 	ZsSettingsLog    zoneSettings;
 	std::vector<int> simZone;
 	int  zoneTeleports = 0;
-	// The ground shavit-misc saw in this command's OnPlayerRunCmd, which runs before the sim's PreMove.
-	int  zonePreGroundKey = INT_MIN;
-	bool zonePreGround = false;
+	// The ground shavit-misc saw in a command's OnPlayerRunCmd, which runs before the sim's PreMove.
+	struct ZonePreGround { int key = INT_MIN; bool onGround = false; } zonePreGround;
 };
+
+// A command key's slot in the PRED_RING_SIZE snapshot rings, negative keys included.
+static inline int PredRingSlot(int key)
+{
+	return ((key % PRED_RING_SIZE) + PRED_RING_SIZE) % PRED_RING_SIZE;
+}
 
 // Same rounding as eventqueuefix, epsilon included.
 static int PredDelayTicks(float delay, float interval)
@@ -1640,11 +1646,16 @@ static void PredEffectMulti(PredRuntime& rt, int entIdx, const PredSimEnt& e)
 	}
 }
 
+// CBaseTrigger::PassesTriggerFilters' spawnflags part: everything (0x40), or clients (0x01) when
+// it's one, and never with 0x20 (no clients).
+static inline bool PredSpawnflagsTouchPlayer(int sf, bool client)
+{
+	return ((sf & 0x40) || ((sf & 0x01) && client)) && !(sf & 0x20);
+}
+
 static bool PredPassesFilters(const PredMap& map, const PredWorld& w, const PredSimEnt& e, PredPlayerIO& io)
 {
-	const int sf = e.spawnflags;
-	const bool client = (*io.flags & FL_CLIENT_BIT) != 0;
-	if (!((sf & 0x40) || ((sf & 0x01) && client)) || (sf & 0x20)) return false;
+	if (!PredSpawnflagsTouchPlayer(e.spawnflags, (*io.flags & FL_CLIENT_BIT) != 0)) return false;
 	return PredFilterPasses(map, e.filterIndex, w.playerName.c_str(), w.playerClass.c_str());
 }
 
@@ -1816,10 +1827,11 @@ static void PredTouchNow(PredRuntime& rt, int i)
 		PredLinkAndTouch(rt, i);
 }
 
-static void PredGatherCandidates(PredRuntime& rt, const float feet[3], const float mins[3], const float maxs[3])
+// Every sim entity whose grid cell the box touches, plus the always-checked and linked ones, sorted.
+// `out` is the caller's: the touch pass uses rt.candidates, rngfix a vector of its own.
+static void PredGatherCandidates(PredRuntime& rt, const float feet[3], const float mins[3], const float maxs[3], std::vector<int>& out)
 {
 	const PredGrid& g = rt.map->grid;
-	std::vector<int>& out = rt.candidates;
 	out.clear();
 	if (++rt.stampNow == 0) { std::fill(rt.stamp.begin(), rt.stamp.end(), 0u); rt.stampNow = 1; }
 	auto add = [&](int i) { if (rt.stamp[i] != rt.stampNow) { rt.stamp[i] = rt.stampNow; out.push_back(i); } };
@@ -1861,7 +1873,7 @@ static void PredRunTouch(PredRuntime& rt, PredPlayerIO& io)
 	PredWorld& w = rt.world;
 
 	float queryOrigin[3] = { io.origin[0], io.origin[1], io.origin[2] };
-	PredGatherCandidates(rt, queryOrigin, io.mins, io.maxs);
+	PredGatherCandidates(rt, queryOrigin, io.mins, io.maxs, rt.candidates);
 	float unlifted[3];
 	bool haveUnlifted = false;
 	// Teleports last: the server's order is its partition's, where the triggers sharing a pass with
@@ -1943,7 +1955,7 @@ static const PredWorld& PredWorldBefore(const PredRuntime& rt, int key)
 {
 	if ((key <= rt.prevKey || !rt.initialized) && !rt.ringKey.empty()) {
 		const int prev = key - 1;
-		const int slot = ((prev % PRED_RING_SIZE) + PRED_RING_SIZE) % PRED_RING_SIZE;
+		const int slot = PredRingSlot(prev);
 		if (rt.ringKey[slot] == prev) return rt.ring[slot];
 	}
 	return rt.world;
@@ -1951,21 +1963,8 @@ static const PredWorld& PredWorldBefore(const PredRuntime& rt, int key)
 
 static void PredResetWorld(const PredMap& map, PredWorld& w)
 {
-	w.linkedList.clear();
-	w.events.clear();
-	w.playerName.clear();
-	w.playerClass = "player";
-	w.baseVelFlag = false;
-	w.gravity = 1.0f;
-	w.gravityFix = false;
-	w.movedLast = false;
-	w.teleportedLast = false;
-	w.duckedAtEnd = false;
-	w.rngTeleportTick = INT_MIN / 2;
-	w.rngTeleportSeq = false;
-	w.mpbhopsBlock = -1;
-	w.mpbhopsPunish = 0.0f;
-	w.zones = ZsState();
+	// Every field back to its default (field by field, landfixLift was missed), then what the map sets.
+	w = PredWorld();
 	w.ents.assign(map.sim.size(), PredEntState());
 	for (size_t i = 0; i < map.sim.size(); ++i) {
 		w.ents[i].disabled = map.sim[i].initialDisabled ? 1 : 0;
@@ -2027,7 +2026,7 @@ static void PredCommandStart(PredRuntime& rt, int key)
 	if (!rt.map) return;
 	if (key <= rt.prevKey || !rt.initialized) {
 		int prev = key - 1;
-		int slot = ((prev % PRED_RING_SIZE) + PRED_RING_SIZE) % PRED_RING_SIZE;
+		int slot = PredRingSlot(prev);
 		// No snapshot: history ran out (or, keyed by tickbase, the server moved it). Going
 		// back to spawn state would stick, so carry on from the latest state.
 		if (rt.ringKey[slot] == prev) rt.world = rt.ring[slot];
@@ -2038,7 +2037,7 @@ static void PredCommandStart(PredRuntime& rt, int key)
 static void PredCommandEnd(PredRuntime& rt, int tick, int key)
 {
 	if (!rt.map) return;
-	int slot = ((key % PRED_RING_SIZE) + PRED_RING_SIZE) % PRED_RING_SIZE;
+	int slot = PredRingSlot(key);
 	rt.ring[slot] = rt.world;
 	rt.ringKey[slot] = key;
 	rt.prevKey = key;
@@ -2117,24 +2116,21 @@ static void PredPreMove(PredRuntime& rt, PredPlayerIO& io)
 	rt.viewSnapPending = false;
 	rt.vsSteps = PRED_SCRIPT_STEPS;
 	rt.mpbhopsStartDoor = -1;
-	const int teleports = rt.teleports;
 	PredCommandStart(rt, PredSnapshotKey(io));
 	if (rt.world.gravityFix) {
 		rt.world.gravityFix = false;
 		// A checkpoint restore (kzcheckpoints keeps gravity) has set it for this command.
-		if (!(rt.cpTeleportPending && !rt.cpKz)) *io.gravity = rt.world.gravity;
+		if (!(rt.cp.pending && !rt.cp.kz)) *io.gravity = rt.world.gravity;
 	}
 	rt.rngTick = io.tick - 1;
-	if (rt.cpTeleportPending) {
+	if (rt.cp.pending) {
 		// FL_DUCKING is already restored, but the server still tests with last command's hull.
 		PredSetHull(io, rt.world.duckedAtEnd);
 		// kzcheckpoints teleports before the untouch and restore; only the flags come back.
-		if (!rt.cpKz) PredLoadCheckpoint(rt, rt.cpLoad);
-		else if (rt.cpLoad) rt.world.baseVelFlag = rt.cpLoad->baseVelFlag;
+		if (!rt.cp.kz) PredLoadCheckpoint(rt, rt.cp.load);
+		else if (rt.cp.load) rt.world.baseVelFlag = rt.cp.load->baseVelFlag;
 		rt.world.zones.teleportKey = PredSnapshotKey(io);
-		rt.cpTeleportPending = false;
-		rt.cpLoad = nullptr;
-		rt.cpKz = false;
+		rt.cp.Clear();
 	}
 	if (rt.eventQueueFix) {
 		const float before[3] = { io.origin[0], io.origin[1], io.origin[2] };
@@ -2154,29 +2150,13 @@ static void PredPreMove(PredRuntime& rt, PredPlayerIO& io)
 	if (PredZonesOn(rt)) {
 		ZsState& z = rt.world.zones;
 		const int key = PredSnapshotKey(io);
-		z.prevGround = rt.zonePreGroundKey == key ? rt.zonePreGround : (*io.flags & FL_ONGROUND) != 0;
+		z.prevGround = rt.zonePreGround.key == key ? rt.zonePreGround.onGround : (*io.flags & FL_ONGROUND) != 0;
 		// PreThinkPost, after shavit's and bhoptools' OnPlayerRunCmd.
 		if (ZsHas(rt.zoneSet, ZS_GRAVITY) || ZsHas(rt.zoneSet, ZS_NOTIMERGRAVITY))
 			ZsPreThinkGravity(rt.zoneSet, PredZoneSettings(rt, io), z, io.solid, io.moveType, io.gravity);
 	}
 	PredPlayerUse(rt, io);
 
-	// rngfix counts a teleport here as the previous tick's; two in a row are left alone.
-	rt.telehopBlocked = rt.world.teleportedLast || rt.teleports != teleports;
-	rt.telehopAir = !(*io.flags & FL_ONGROUND) && io.moveType == PRED_MOVETYPE_WALK;
-	rt.telehopVelZ = io.velocity[2];
-	rt.telehopBaseVelZ = io.baseVelocity[2];
-	rt.telehopGravity = *io.gravity != 0.0f ? *io.gravity : 1.0f;
-}
-
-static void PredTelehop(const PredRuntime& rt, PredPlayerIO& io)
-{
-	const float finishGravity = *io.gravity != 0.0f ? *io.gravity : 1.0f;
-	float z = rt.telehopVelZ;
-	z -= rt.telehopGravity * 800.0f * 0.5f * io.interval;
-	z += rt.telehopBaseVelZ * io.interval;
-	z -= finishGravity * 800.0f * 0.5f * io.interval;
-	io.velocity[2] = z;
 }
 
 static int  PredMpbhopsTouchedDoor(const PredRuntime& rt, const PredPlayerIO& io);
@@ -2188,7 +2168,6 @@ static void PredPostMove(PredRuntime& rt, PredPlayerIO& io)
 	rt.io = &io;
 	rt.serviceBase = PredEventClock(io) + 1;
 	const float before[3] = { io.origin[0], io.origin[1], io.origin[2] };
-	const bool landed = rt.telehopAir && (*io.flags & FL_ONGROUND);
 	const int teleports = rt.teleports;
 	// The move's touch list is made before any trigger moves the player.
 	const int door = PredMpbhopsTouchedDoor(rt, io);
@@ -2200,7 +2179,6 @@ static void PredPostMove(PredRuntime& rt, PredPlayerIO& io)
 	const bool teleported = rt.teleports != teleports;
 	// rngfix does this in PostThink, before any timed event.
 	if (rt.postThinkHook) rt.postThinkHook(rt.postThinkUser, rt, io);
-	else if (rt.rngfixTelehop && teleported && landed && !rt.telehopBlocked) PredTelehop(rt, io);
 	rt.world.teleportedLast = teleported;
 	if (io.frameEnd) PredUntouch(rt);
 	PredRunDoors(rt);

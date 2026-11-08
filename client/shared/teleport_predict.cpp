@@ -5,6 +5,7 @@
 #include "rngfix_predict.h"
 #include "utils.h"
 #include "datamap.h"
+#include "player_fields.h"
 #include "sigs.h"
 #include "published.h"
 #include "game_layout.h"
@@ -624,12 +625,6 @@ bool Alive(const char* pl)
     return LifeAlive(pl) && (g_observerOffset <= 0 || *reinterpret_cast<const int*>(pl + g_observerOffset) == 0);
 }
 
-// ConCommandBase name +0x18; ConVar (secondary IConVar vptr at +0x30) m_pParent +0x38,
-// m_fValue +0x54. The data layout is the same on both ABIs.
-const int kCCB_Name      = 0x18;
-const int kConVar_Parent = 0x38;
-const int kConVar_Float  = 0x54;
-
 // The engine keeps pointers to these for the whole process.
 const int kCmdCount = 3;
 ConCommandX g_cmds[kCmdCount];
@@ -646,10 +641,9 @@ const float* FindCvarFloat(void* cvar, const char* name)
 {
     char* v = static_cast<char*>(VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, name));
     if (!v || VFunc<bool (*)(void*)>(v, VT_CCB_IsCommand)(v)) return nullptr;
-    const char* n = *reinterpret_cast<const char* const*>(v + kCCB_Name);
+    const char* n = *reinterpret_cast<const char* const*>(v + OFF_ConVar_Name);
     if (!n || strcmp(n, name) != 0) return nullptr;
-    char* parent = *reinterpret_cast<char**>(v + kConVar_Parent);
-    return reinterpret_cast<const float*>((parent ? parent : v) + kConVar_Float);
+    return reinterpret_cast<const float*>(ConVarValueOwner(v) + OFF_ConVar_FloatValue);
 }
 
 float CvarOr(const float* v, float def) { return v ? *v : def; }
@@ -914,7 +908,7 @@ void JumpLogStart(char* pl, char* md, bool firstRun)
     const int key = JumpKey(pl);
     const float z = reinterpret_cast<float*>(md + MV_AbsOrigin)[2];
     const float vz = reinterpret_cast<float*>(md + MV_Velocity)[2];
-    JumpStart& slot = g_jumpStarts[((key % PRED_RING_SIZE) + PRED_RING_SIZE) % PRED_RING_SIZE];
+    JumpStart& slot = g_jumpStarts[PredRingSlot(key)];
     if (firstRun) {
         slot = { key, z, vz };
     } else if (key != g_lastRunKey + 1 && g_lastJump.key != INT_MIN && key > g_lastJump.key) {
@@ -1222,7 +1216,7 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     }
 
     // A checkpoint restore has already rewritten mv this command.
-    if (!g_offsetsChecked && netvars && !g_rt.cpTeleportPending) {
+    if (!g_offsetsChecked && netvars && !g_rt.cp.pending) {
         const Vector3 mvVel = *velocity;
         if (Len(mvVel) > 50.0f) {
             const Vector3 entVel = *reinterpret_cast<const Vector3*>(pl + g_velOffset);
@@ -1274,9 +1268,7 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     g_sjJump.triggers = triggers;
     if (!rngWanted) RngPredictStop(*g_rngp, g_rt);
     if (!triggers) {
-        g_rt.cpTeleportPending = false;
-        g_rt.cpLoad = nullptr;
-        g_rt.cpKz = false;
+        g_rt.cp.Clear();
         // A synced gravity is for the next simulated command only.
         g_rt.world.gravityFix = false;
     }
@@ -1332,7 +1324,6 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     if (rng) in = RngfixInput(md, pl);
 
     const RngSettings& rs = TeleportPredict_RngfixSettings();
-    g_rt.rngfixTelehop = rs.known && rs.telehop;
     const bool shotLog = g_shotLog && triggers && firstRun;
     if (shotLog) g_shotLogName = g_rt.world.playerName;
     if (triggers) PredPreMove(g_rt, io);
@@ -1413,49 +1404,30 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
 // Datamaps also cover m_MoveType, whose RecvProp is a proxy with offset 0.
 bool FindNetvars()
 {
-    dm::FieldReq req[] = {
-        { "m_vecBaseVelocity", dm::FIELD_VECTOR,    12, {}, 0, -1 },
-        { "m_vecVelocity",     dm::FIELD_VECTOR,    12, {}, 0, -1 },
-        { "m_fFlags",          dm::FIELD_INTEGER,   4,  {}, 0, -1 },
-        { "m_flGravity",       dm::FIELD_FLOAT,     4,  {}, 0, -1 },
-        { "m_nTickBase",       dm::FIELD_INTEGER,   4,  {}, 0, -1 },
-        { "m_lifeState",       dm::FIELD_CHARACTER, 1,  {}, 0, -1 },
-        { "m_MoveType",        dm::FIELD_CHARACTER, 1,  {}, 0, -1 },
-        // rngfix's; m_bDucking and m_flStepSize are CPlayerLocalData members, relative to m_Local.
-        { "m_Local",           dm::FIELD_EMBEDDED,  -1, {}, 0, -1 },
-        { "m_bDucking",        dm::FIELD_BOOLEAN,   1,  {}, 0, -1 },
-        { "m_flStepSize",      dm::FIELD_FLOAT,     4,  {}, 0, -1 },
-        { "m_nWaterLevel",     dm::FIELD_CHARACTER, 1,  {}, 0, -1 },
-        { "m_hGroundEntity",   dm::FIELD_EHANDLE,   4,  {}, 0, -1 },
-        { "m_flWaterJumpTime", dm::FIELD_FLOAT,     4,  {}, 0, -1 },
-        { "m_surfaceFriction", dm::FIELD_FLOAT,     4,  {}, 0, -1 },
-        { "m_flStamina",       dm::FIELD_FLOAT,     4,  {}, 0, -1 },
-        { "m_vecViewOffset",   dm::FIELD_VECTOR,    12, {}, 0, -1 },
-    };
-    dm::ResolveFields(ModuleDataRanges(CLIENT_MODULE), req, (int)(sizeof(req) / sizeof(req[0])));
-    g_baseVelOffset  = req[0].offset;
-    g_velOffset      = req[1].offset;
-    g_flagsOffset    = req[2].offset;
-    g_gravityOffset  = req[3].offset;
-    g_tickBaseOffset = req[4].offset;
+    const pf::Offsets f = pf::Resolve(ModuleDataRanges(CLIENT_MODULE));
+    g_baseVelOffset  = f[pf::BaseVelocity];
+    g_velOffset      = f[pf::Velocity];
+    g_flagsOffset    = f[pf::Flags];
+    g_gravityOffset  = f[pf::Gravity];
+    g_tickBaseOffset = f[pf::TickBase];
 
     // Optional: without these every player counts as alive and walking.
-    g_lifeStateOffset = req[5].offset;
-    g_moveTypeOffset  = req[6].offset;
+    g_lifeStateOffset = f[pf::LifeState];
+    g_moveTypeOffset  = f[pf::MoveType];
     g_observerOffset  = FindNetvarOffset("m_iObserverMode", kDPT_Int);
 
-    // rngfix falls back to defaults without these.
-    const int local = req[7].offset;
-    g_duckingOffset    = local >= 0 && req[8].offset > 0 ? local + req[8].offset : -1;
-    g_stepSizeOffset   = local >= 0 && req[9].offset > 0 ? local + req[9].offset : -1;
-    g_waterLevelOffset = req[10].offset;
-    g_groundOffset     = req[11].offset;
-    g_waterJumpOffset  = req[12].offset;
-    g_frictionOffset   = req[13].offset;
-    g_staminaOffset    = req[14].offset;
+    // rngfix falls back to defaults without these; m_bDucking and m_flStepSize are relative to m_Local.
+    const int local = f[pf::Local];
+    g_duckingOffset    = local >= 0 && f[pf::Ducking] > 0 ? local + f[pf::Ducking] : -1;
+    g_stepSizeOffset   = local >= 0 && f[pf::StepSize] > 0 ? local + f[pf::StepSize] : -1;
+    g_waterLevelOffset = f[pf::WaterLevel];
+    g_groundOffset     = f[pf::GroundEntity];
+    g_waterJumpOffset  = f[pf::WaterJumpTime];
+    g_frictionOffset   = f[pf::SurfaceFriction];
+    g_staminaOffset    = f[pf::Stamina];
     // No datamap entry on the client, only the RecvProp.
     g_laggedOffset     = FindNetvarOffset("m_flLaggedMovementValue", kDPT_Float);
-    g_viewOffsetZ      = req[15].offset > 0 ? req[15].offset + 8 : -1;
+    g_viewOffsetZ      = f[pf::ViewOffset] > 0 ? f[pf::ViewOffset] + 8 : -1;
 
     return g_baseVelOffset > 0 && g_velOffset > 0 && g_flagsOffset > 0
         && g_gravityOffset > 0 && g_tickBaseOffset > 0;
@@ -1489,7 +1461,7 @@ void RegisterCommands()
     g_registered = true;
     void* cvar = CreateInterfaceIn(VSTDLIB_MODULE, "VEngineCvar004");
     void* echo = cvar ? VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "echo") : nullptr;
-    const char* echoName = echo ? *reinterpret_cast<const char* const*>(static_cast<char*>(echo) + kCCB_Name) : nullptr;
+    const char* echoName = echo ? *reinterpret_cast<const char* const*>(static_cast<char*>(echo) + OFF_ConVar_Name) : nullptr;
     if (!echo || !VFunc<bool (*)(void*)>(echo, VT_CCB_IsCommand)(echo) || !echoName || strcmp(echoName, "echo")) {
         CoreLog("bhoptools: couldn't register the prediction commands");
         return;
@@ -1497,9 +1469,6 @@ void RegisterCommands()
     const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
         { "bhoptools_predict", "Client-side prediction of triggers, rngfix, checkpoints and HUD speed (0/1).", Cmd_Predict },
         { "bhoptools_log", "Start or stop writing debug info to cstrike/bhoptools_log.txt, to send with a bug report.", Cmd_Log },
-#ifdef BHOPTOOLS_DEV
-        { "bhoptools_shotlog", "Print predicted shots on damage-activated buttons, the targetname they give and the pushes that follow (0/1).", Cmd_ShotLog },
-#endif
     };
     for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
         ConCommandX& c = g_cmds[i];
@@ -1674,7 +1643,7 @@ void SetCheckpointPrinter(void (*print)()) { g_printCheckpoints = print; }
 
 void TeleportPredict_OnCheckpointTeleport()
 {
-    tp::g_rt.cpTeleportPending = true;
+    tp::g_rt.cp.pending = true;
 }
 
 bool TeleportPredict_SetOwnViewAngles(float pitch, float yaw, float roll)
@@ -1788,11 +1757,6 @@ float TeleportPredict_SurfaceFriction(void* player)
     return tp::g_frictionOffset > 0 ? *reinterpret_cast<const float*>(static_cast<const char*>(player) + tp::g_frictionOffset) : 1.0f;
 }
 
-float TeleportPredict_Stamina(void* player)
-{
-    return tp::g_staminaOffset > 0 ? *reinterpret_cast<const float*>(static_cast<const char*>(player) + tp::g_staminaOffset) : 0.0f;
-}
-
 bool TeleportPredict_TraceDown(const float origin[3], float distance, bool ducked, bool onGround, bool firstRun, RngTraceResult& tr)
 {
     return tp::TraceDown(origin, distance, ducked, onGround, firstRun, tr);
@@ -1814,7 +1778,7 @@ void TeleportPredict_PruneCheckpoints(bool (*inUse)(int cpIndex))
     if (!tp::g_checkpoints) return;
     for (auto it = tp::g_checkpoints->begin(); it != tp::g_checkpoints->end();) {
         // A load waiting for the next move points at its state.
-        if (&it->second == tp::g_rt.cpLoad || inUse(it->first)) ++it;
+        if (&it->second == tp::g_rt.cp.load || inUse(it->first)) ++it;
         else it = tp::g_checkpoints->erase(it);
     }
 }
@@ -1822,8 +1786,8 @@ void TeleportPredict_PruneCheckpoints(bool (*inUse)(int cpIndex))
 void TeleportPredict_OnCheckpointLoad(int cpIndex, bool kz)
 {
     auto it = tp::g_checkpoints->find(cpIndex);
-    tp::g_rt.cpLoad = it == tp::g_checkpoints->end() ? nullptr : &it->second;
-    tp::g_rt.cpKz = kz;
+    tp::g_rt.cp.load = it == tp::g_checkpoints->end() ? nullptr : &it->second;
+    tp::g_rt.cp.kz = kz;
 }
 
 void TeleportPredict_SetStateSync(bool on)
@@ -1903,8 +1867,7 @@ bool TeleportPredict_ZonesPreCmd(void* player, int cmdNumber, ZsCmd& c, int* inS
 	if (ZsKnown(rt.zoneSet, ZS_START)) *inStart = ZsInside(rt.zoneSet, st, ZS_START, s.track);
 	if (ZsKnown(rt.zoneSet, ZS_FREESTYLE)) *freestyle = ZsInside(rt.zoneSet, st, ZS_FREESTYLE, -1);
 	ZsPreCmd(rt.zoneSet, s, st, c);
-	tp::g_rt.zonePreGroundKey = key;
-	tp::g_rt.zonePreGround = c.onGround;
+	tp::g_rt.zonePreGround = { key, c.onGround };
 	return true;
 }
 

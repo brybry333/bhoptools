@@ -21,33 +21,41 @@ inline void MouseSplitClear(MouseSplit& m)
 }
 
 // Assumes the motion was linear between the last split and the newest event; split == 0 takes all.
-inline void MouseSplitTake(MouseSplit& m, int& outX, int& outY, double split)
+// This form works on accumulators kept elsewhere (Windows: the engine's CInputSystem members).
+// neverSplit is the caller's own test: MouseSplit starts at -1 and tests < 0; Windows keeps
+// RawInput2's == 0, which also takes a split before the first sample (-0.01) as a real one.
+inline void MouseSplitTake(int& accumX, int& accumY, double& splitTime, bool neverSplit, double sampleTime, int& outX, int& outY, double split)
 {
-	if (m.splitTime < 0.0) m.splitTime = m.sampleTime - 0.01;
+	if (neverSplit) splitTime = sampleTime - 0.01;
 
-	const double dt = m.splitTime - m.sampleTime;
+	const double dt = splitTime - sampleTime;
 	if ((dt < 0 ? -dt : dt) < 0.000001) {
 		outX = outY = 0;
 		return;
 	}
 
-	if (split == 0.0 || split >= m.sampleTime) {
-		outX = m.accumX;
-		outY = m.accumY;
-		m.accumX = m.accumY = 0;
-		m.splitTime = m.sampleTime;
+	if (split == 0.0 || split >= sampleTime) {
+		outX = accumX;
+		outY = accumY;
+		accumX = accumY = 0;
+		splitTime = sampleTime;
 		return;
 	}
 
-	if (split >= m.splitTime) {
-		const float seg = (float)((split - m.splitTime) / (m.sampleTime - m.splitTime));
-		outX = (int)(seg * (float)m.accumX);
-		outY = (int)(seg * (float)m.accumY);
-		m.accumX -= outX;
-		m.accumY -= outY;
-		m.splitTime = split;
+	if (split >= splitTime) {
+		const float seg = (float)((split - splitTime) / (sampleTime - splitTime));
+		outX = (int)(seg * (float)accumX);
+		outY = (int)(seg * (float)accumY);
+		accumX -= outX;
+		accumY -= outY;
+		splitTime = split;
 		return;
 	}
 
 	outX = outY = 0;
+}
+
+inline void MouseSplitTake(MouseSplit& m, int& outX, int& outY, double split)
+{
+	MouseSplitTake(m.accumX, m.accumY, m.splitTime, m.splitTime < 0.0, m.sampleTime, outX, outY, split);
 }

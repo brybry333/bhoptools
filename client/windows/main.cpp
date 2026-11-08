@@ -14,8 +14,9 @@
 #include "utils.h"
 #include "version.h"
 #include "update_json.h"
-#include "dev_update.h"
+#include "file_util.h"
 #include "release_sig.h"
+#include "self_update.h"
 #include "sigs.h"
 #include "download_progress.h"
 #include "fastdl.h"
@@ -27,9 +28,12 @@
 #include "settings.h"
 #include "options_tab.h"
 #include "spectate.h"
+#include "client_core.h"
 #include "game_layout.h"
 #include "pollfix.h"
 #include "rawprecise.h"
+#include "mouse_split.h"
+#include "frametime_floor.h"
 
 // TaskDialog needs common controls v6.
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -65,7 +69,7 @@ int* m_rawinput_cvar;
 
 float mouseMoveFrameTime;
 
-double m_mouseSplitTime;
+double m_mouseSplitTime; // 0 until the first split (MouseSplitTake's neverSplit)
 double m_mouseSampleTime;
 float m_flMouseSampleTime;
 
@@ -150,45 +154,7 @@ bool GetRawMouseAccumulators(int& accumX, int& accumY, double frame_split)
 	if (frame_split != 0.0 && DrainRawInput())
 		m_mouseSampleTime = Plat_FloatTime();
 
-	double mouseSplitTime = m_mouseSplitTime;
-	if (mouseSplitTime == 0.0)
-	{
-		mouseSplitTime = m_mouseSampleTime - 0.01;
-		m_mouseSplitTime = mouseSplitTime;
-	}
-
-	double mouseSampleTime = m_mouseSampleTime;
-
-	if (abs(mouseSplitTime - mouseSampleTime) >= 0.000001)
-	{
-		if (frame_split == 0.0 || frame_split >= mouseSampleTime)
-		{
-			accumX = *m_mouseRawAccumX;
-			accumY = *m_mouseRawAccumY;
-			*m_mouseRawAccumX = *m_mouseRawAccumY = 0;
-
-			m_mouseSplitTime = m_mouseSampleTime;
-
-			return *m_bRawInputSupported;
-		}
-		else if (frame_split >= mouseSplitTime)
-		{
-			float splitSegment = (frame_split - mouseSplitTime) / (mouseSampleTime - mouseSplitTime);
-
-			accumX = splitSegment * (*m_mouseRawAccumX);
-			accumY = splitSegment * (*m_mouseRawAccumY);
-
-			*m_mouseRawAccumX -= accumX;
-			*m_mouseRawAccumY -= accumY;
-
-			m_mouseSplitTime = frame_split;
-
-			return *m_bRawInputSupported;
-		}
-	}
-
-	accumX = accumY = 0;
-
+	MouseSplitTake(*m_mouseRawAccumX, *m_mouseRawAccumY, m_mouseSplitTime, m_mouseSplitTime == 0.0, m_mouseSampleTime, accumX, accumY, frame_split);
 	return *m_bRawInputSupported;
 }
 
@@ -207,7 +173,7 @@ void GetAccumulatedMouseDeltasAndResetAccumulators(CInput* thisptr, float* mx, f
 		{
 			if (settings::Get().rawinput && frametime > 0.0)
 			{
-				m_flMouseSampleTime -= MIN(m_flMouseSampleTime, frametime);
+				m_flMouseSampleTime -= m_flMouseSampleTime < frametime ? m_flMouseSampleTime : frametime;
 				GetRawMouseAccumulators(rawMouseX, rawMouseY, Plat_FloatTime() - m_flMouseSampleTime);
 			}
 			else
@@ -227,7 +193,6 @@ void GetAccumulatedMouseDeltasAndResetAccumulators(CInput* thisptr, float* mx, f
 
 		*mx = (float)rawMouseX;
 		*my = (float)rawMouseY;
-		cp::AddInput(*mx, *my);
 	}
 	else
 	{
@@ -241,40 +206,6 @@ bool __fastcall Hooked_GetRawMouseAccumulators(void* thisptr, int& accumX, int& 
 	return GetRawMouseAccumulators(accumX, accumY, 0.0);
 }
 
-#ifdef BHOPTOOLS_DEV
-// The launcher installs it when it next starts: it's the one replacing its own exe.
-void Cmd_DevInstall(const CCommandX& c)
-{
-	const std::string tag = c.argc > 1 ? c.argv[1] : "";
-	if (tag == "latest")
-	{
-		dev::WriteState(dev::kHeldFile, "");
-		dev::WriteState(dev::kInstallFile, "");
-		CoreLog("the newest dev build is offered again when bhoptools-dev.exe next starts");
-		return;
-	}
-	if (tag.compare(0, 4, "dev-") != 0)
-	{
-		CoreLog("bhoptools_install dev-<n>, or latest to follow the newest again; bhoptools_builds lists them");
-		return;
-	}
-	if (dev::WriteState(dev::kInstallFile, tag))
-		CoreLog("%s is installed the next time bhoptools-dev.exe starts", tag.c_str());
-	else
-		CoreLog("couldn't write to %s", settings::Dir().c_str());
-}
-
-DWORD WINAPI DevBuildsThread(LPVOID)
-{
-	dev::PrintBuilds();
-	return 0;
-}
-
-void Cmd_DevBuilds(const CCommandX&)
-{
-	CloseHandle(CreateThread(nullptr, 0, DevBuildsThread, nullptr, 0, nullptr));
-}
-#endif
 
 LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -296,21 +227,11 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 	}
 	tp::RegisterCommands();
 	speedo::RegisterCommands();
-#ifdef BHOPTOOLS_DEV
-	dev::RegisterCommands(Cmd_DevInstall, Cmd_DevBuilds);
-#endif
 	pollfix::RegisterCommands();
 	if (g_rawInput2Ready)
 		rawprecise::RegisterCommands();
-	// GameUI's vtables are patched on the game thread; a failed look is a few ms of scanning, so once a second.
-	static bool optionsDone = false;
-	static ULONGLONG optionsNext = 0;
-	static bool spectateDone = false;
-	if ((!optionsDone || !spectateDone) && g_hotkeyReady && GetTickCount64() >= optionsNext) {
-		if (!optionsDone) optionsDone = options::Install();
-		if (!spectateDone) spectateDone = spectate::Install();
-		optionsNext = GetTickCount64() + 1000;
-	}
+	// GameUI's vtables are patched on the game thread.
+	if (g_hotkeyReady) core::PollLateInstalls(MonotonicSeconds());
 	switch (uMsg)
 	{
 	case WM_SYSKEYDOWN:
@@ -381,13 +302,7 @@ void __fastcall Hooked_CEngineVGui_UpdateCustomProgressBar(void* thisptr, float 
 
 // The injected image keeps the launcher's resolved imports, which only hold for DLLs the game
 // has mapped at the same address, so WinHTTP is resolved here.
-#ifdef BHOPTOOLS_DEV
-// With `headers` a redirect isn't followed: its target goes to `location` and false is returned.
-bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file,
-	const wchar_t* headers = nullptr, std::wstring* location = nullptr)
-#else
 bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file)
-#endif
 {
 	HMODULE h = LoadLibraryA("winhttp.dll");
 	if (!h)
@@ -404,12 +319,6 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 	if (!open || !setTimeouts || !connect || !openRequest || !sendRequest || !receiveResponse
 			|| !queryHeaders || !readData || !closeHandle)
 		return false;
-#ifdef BHOPTOOLS_DEV
-	auto setOption = (decltype(&WinHttpSetOption))GetProcAddress(h, "WinHttpSetOption");
-	auto addHeaders = (decltype(&WinHttpAddRequestHeaders))GetProcAddress(h, "WinHttpAddRequestHeaders");
-	if (!setOption || !addHeaders)
-		return false;
-#endif
 
 	unsigned int r1 = GetTickCount(), r2 = GetCurrentThreadId();
 	rand_s(&r1);
@@ -424,19 +333,6 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 	HINTERNET conn = session ? connect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0) : nullptr;
 	HINTERNET req = conn ? openRequest(conn, L"GET", path, nullptr, WINHTTP_NO_REFERER,
 		WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
-#ifdef BHOPTOOLS_DEV
-	// WinHTTP would send the token on to the asset's storage host, which refuses it.
-	if (req && headers)
-	{
-		DWORD feature = WINHTTP_DISABLE_REDIRECTS;
-		if (!setOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &feature, sizeof(feature))
-				|| !addHeaders(req, headers, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD))
-		{
-			closeHandle(req);
-			req = nullptr;
-		}
-	}
-#endif
 	DWORD status = 0, statusSize = sizeof(status);
 	if (req && sendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
 			&& receiveResponse(req, nullptr)
@@ -458,15 +354,6 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 			ok = fclose(f) == 0 && ok;
 		}
 	}
-#ifdef BHOPTOOLS_DEV
-	if (location && (status == 301 || status == 302 || status == 307))
-	{
-		wchar_t loc[4096];
-		DWORD size = sizeof(loc);
-		if (queryHeaders(req, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &size, WINHTTP_NO_HEADER_INDEX))
-			*location = loc;
-	}
-#endif
 	if (req) closeHandle(req);
 	if (conn) closeHandle(conn);
 	if (session) closeHandle(session);
@@ -477,49 +364,8 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 	return ok;
 }
 
-#ifdef BHOPTOOLS_DEV
-// Paths from getenv and the A functions are in the ANSI code page.
-std::wstring Widen(const std::string& s, UINT codepage = CP_UTF8)
-{
-	wchar_t buf[4096];
-	return MultiByteToWideChar(codepage, 0, s.c_str(), -1, buf, 4096) ? buf : L"";
-}
 
-// Splits https://host/path into its host and path.
-bool SplitUrl(const std::wstring& url, std::wstring& host, std::wstring& path)
-{
-	if (url.compare(0, 8, L"https://") != 0)
-		return false;
-	const size_t slash = url.find(L'/', 8);
-	if (slash == std::wstring::npos)
-		return false;
-	host = url.substr(8, slash - 8);
-	path = url.substr(slash);
-	return true;
-}
-
-bool dev::Download(const std::string& url, bool asset, const std::string& file)
-{
-	const std::string token = Token();
-	std::wstring host, path;
-	if (token.empty() || !SplitUrl(Widen(url), host, path))
-		return false;
-	const std::wstring headers = L"Authorization: Bearer " + Widen(token)
-		+ (asset ? L"\r\nAccept: application/octet-stream" : L"\r\nAccept: application/vnd.github+json")
-		+ L"\r\nX-GitHub-Api-Version: 2022-11-28";
-	const std::wstring wfile = Widen(file, CP_ACP);
-	std::wstring location;
-	if (HttpsDownload(host.c_str(), path.c_str(), wfile.c_str(), headers.c_str(), &location))
-		return true;
-	return asset && SplitUrl(location, host, path) && HttpsDownload(host.c_str(), path.c_str(), wfile.c_str());
-}
-#endif
-
-#ifdef BHOPTOOLS_DEV
-#define SETTINGS_DIR_W L"bhoptools-dev"
-#else
 #define SETTINGS_DIR_W L"bhoptools"
-#endif
 
 // Update / Not now / Don't ask again. Returns IDYES, IDNO or IDCANCEL.
 static int AskUpdate(const wchar_t* text, const wchar_t* title)
@@ -552,7 +398,7 @@ static int AskUpdate(const wchar_t* text, const wchar_t* title)
 	return MessageBoxW(NULL, text, title, MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
 }
 
-// %APPDATA%\bhoptools\tmp (bhoptools-dev for the dev client), for downloads and the lump
+// %APPDATA%\bhoptools\tmp, for downloads and the lump
 // checksums, with the .part files of downloads that never finished removed. A download still
 // running has its .part open, so that one stays. Empty when there's no such folder.
 std::wstring TempDir()
@@ -644,13 +490,7 @@ bool g_checkpointPredictReady = false;
 
 void __fastcall Hooked_LevelInitPreEntity(void* thisptr, const char* mapname)
 {
-	settings::ApplyRawInput(true);
-	if (g_checkpointPredictReady)
-		cp::OnLevelInit();
-	// A same-map reconnect keeps the level name, so the sim can't see it itself.
-	if (g_teleportPredictReady)
-		tp::OnLevelInit();
-	oLevelInitPreEntity(thisptr, fastdl::ServerMapName(mapname));
+	oLevelInitPreEntity(thisptr, core::OnLevelInit(mapname, g_checkpointPredictReady, g_teleportPredictReady));
 }
 
 typedef void(__fastcall* CInput_CreateMoveFn)(void*, int, float, bool);
@@ -661,22 +501,13 @@ void __fastcall Hooked_InputCreateMove(void* thisptr, int sequence, float framet
 {
 	oInputCreateMove(thisptr, sequence, frametime, active);
 	speedo::OnCommand(thisptr, sequence);
-	cp::OnCreateMove(sequence);
-}
-
-bool InClient(const void* p)
-{
-	MODULEINFO mi{};
-	HMODULE h = GetModuleHandleA("client.dll");
-	if (!h || !GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi))) return false;
-	return (uintptr_t)p >= (uintptr_t)mi.lpBaseOfDll && (uintptr_t)p < (uintptr_t)mi.lpBaseOfDll + mi.SizeOfImage;
 }
 
 // The CInput behind the `input` global that CHLClient::CreateMove loads before its call through slot 3.
 void* FindInput(void* hlclient)
 {
 	const unsigned char* fn = (*reinterpret_cast<const unsigned char* const* const*>(hlclient))[VT_Client_CreateMove];
-	if (!InClient(fn)) return nullptr;
+	if (!InModuleCode(CLIENT_MODULE, fn)) return nullptr;
 	void* const* global = nullptr;
 	bool called = false;
 	for (int i = 0; i < 0x60 && !called; ++i) {
@@ -685,10 +516,10 @@ void* FindInput(void* hlclient)
 		else if (global && fn[i] == 0xFF && fn[i + 1] == 0x50 && fn[i + 2] == 0x18)
 			called = true;
 	}
-	void* input = called && InClient(global) ? *global : nullptr;
-	if (!input || !InClient(input)) return nullptr;
+	void* input = called && InModuleCode(CLIENT_MODULE, global) ? *global : nullptr;
+	if (!input || !InModuleCode(CLIENT_MODULE, input)) return nullptr;
 	void** vt = *reinterpret_cast<void***>(input);
-	return InClient(vt) && InClient(vt[VT_IInput_CreateMove]) && InClient(vt[VT_IInput_GetUserCmd]) ? input : nullptr;
+	return InModuleCode(CLIENT_MODULE, vt) && InModuleCode(CLIENT_MODULE, vt[VT_IInput_CreateMove]) && InModuleCode(CLIENT_MODULE, vt[VT_IInput_GetUserCmd]) ? input : nullptr;
 }
 
 BOOL IsProcessRunning(DWORD processID)
@@ -782,19 +613,21 @@ DWORD InjectionEntryPoint(DWORD processID)
 	oCHostState_OnClientConnected = (CHostState_OnClientConnectedFn)(FindPatternLogged("engine.dll", "CHostState::OnClientConnected", "40 53 48 83 EC 60 80 B9 ? ? ? ? 00 48 8B D9 0F 84"));
 
 	// Host_AccumulateTime raises every frame to at least 1 ms, so above 1000 fps the client's clock
-	// runs ahead of real time and the server corrects it. NOP the maxsd against MIN_FRAMETIME.
+	// runs ahead of real time and the server corrects it. NOP the maxsd against MIN_FRAMETIME; the
+	// game outlives the launcher, so the unload below puts it back.
+	BYTE* frametimeSite = nullptr;
+	BYTE frametimeOriginal[8];
 	if (auto minFrametime = (BYTE*)FindPatternLogged("engine.dll", "Host_AccumulateTime min frametime", SIG_HostAccumulateTime_MinFrametime))
 	{
 		BYTE* site = minFrametime + 15;
-		double floor;
-		memcpy(&floor, site + 8 + *(int32_t*)(site + 4), sizeof(floor));
 		DWORD protect;
-		if (floor != 0.001)
+		if (!FrametimeFloorPatchable(site))
 			CoreLog("frametime floor: the clamp isn't 0.001, leaving it");
 		else if (VirtualProtect(site, 8, PAGE_EXECUTE_READWRITE, &protect))
 		{
-			static const BYTE nop8[8] = { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 };
-			memcpy(site, nop8, 8);
+			memcpy(frametimeOriginal, site, 8);
+			frametimeSite = site;
+			memcpy(site, kFrametimeFloorNop, 8);
 			VirtualProtect(site, 8, protect, &protect);
 			FlushInstructionCache(GetCurrentProcess(), site, 8);
 		}
@@ -817,14 +650,10 @@ DWORD InjectionEntryPoint(DWORD processID)
 	}
 	// The call that matters is inlined into CInput::MouseMove and patched below.
 	oGetAccumulatedMouseDeltasAndResetAccumulators = (GetAccumulatedMouseDeltasAndResetAccumulatorsFn)(FindPatternLogged("client.dll", "CInput::GetAccumulatedMouseDeltasAndResetAccumulators", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 20 8B 41 ? 49 8B F8"));
-	// ConVar (x64): name +0x18, m_pParent +0x38, m_nValue +0x58.
 	if (void* m_rawinput = FindConCommandBase("m_rawinput"))
 	{
-		if (StringPtrIs((char*)m_rawinput + 0x18, "m_rawinput"))
-		{
-			char* parent = *(char**)((char*)m_rawinput + 0x38);
-			m_rawinput_cvar = (int*)((parent ? parent : (char*)m_rawinput) + 0x58);
-		}
+		if (StringPtrIs((char*)m_rawinput + OFF_ConVar_Name, "m_rawinput"))
+			m_rawinput_cvar = (int*)(ConVarValueOwner((char*)m_rawinput) + OFF_ConVar_IntValue);
 	}
 	// A rip-relative MOV, not a LEA, but the displacement sits in the same place.
 	if (oGetAccumulatedMouseDeltasAndResetAccumulators && !m_rawinput_cvar)
@@ -993,13 +822,11 @@ DWORD InjectionEntryPoint(DWORD processID)
 		CloseHandle(CreateThread(nullptr, 0, LumpChecksumsThread, nullptr, 0, nullptr));
 
 	bool jumpPredPatched = false;
-	if (g_teleportPredictReady && !settings::Get().predict)
-		tp::SetEnabled(false);
+	core::SyncPredict();
 	settings::SetApply([&]
 	{
 		const Settings& s = settings::Get();
-		if (tp::Enabled() != s.predict)
-			tp::SetEnabled(s.predict);
+		core::SyncPredict();
 		if (viewpunchRemoved != s.viewpunch)
 			setViewpunch(s.viewpunch);
 	});
@@ -1021,9 +848,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		}
 		else if (key == 4)
 		{
-			settings::Get().predict = !settings::Get().predict;
-			settings::Changed();
-			HudPrint("prediction %d", tp::Enabled() ? 1 : 0);
+			HudPrint("prediction %d", core::TogglePredict() ? 1 : 0);
 		}
 	};
 	g_hotkeyReady = true;
@@ -1049,6 +874,16 @@ DWORD InjectionEntryPoint(DWORD processID)
 	{
 		memcpy(jumpPred, jumpPredOriginalBytes, sizeof(jumpPredOriginalBytes));
 		VirtualProtect(jumpPred, sizeof(jumpPredOriginalBytes), jumpPredOriginalProtect, &jumpPredOriginalProtect);
+	}
+	if (frametimeSite)
+	{
+		DWORD protect;
+		if (VirtualProtect(frametimeSite, 8, PAGE_EXECUTE_READWRITE, &protect))
+		{
+			memcpy(frametimeSite, frametimeOriginal, 8);
+			VirtualProtect(frametimeSite, 8, protect, &protect);
+			FlushInstructionCache(GetCurrentProcess(), frametimeSite, 8);
+		}
 	}
 
 	// Need Hooked_WindowProc still attached. rawprecise first, so no-legacy is taken off the game's registration.
@@ -1266,19 +1101,16 @@ std::string GetCSSLaunchOptions(std::string const & steampath, std::string const
 	return "";
 }
 
-#ifndef BHOPTOOLS_DEV
 // Offers to replace this exe with the latest release. True when the new copy was started.
 bool SelfUpdate()
 {
 	if (!strcmp(APP_VERSION, "dev"))
 		return false;
 
-	wchar_t buf[MAX_PATH];
-	GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
-	const std::wstring settingsDir = std::wstring(buf) + L"\\bhoptools";
-	const std::wstring ignoreFile = settingsDir + L"\\no_update_check";
-	const bool ignored = GetFileAttributesW(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES;
+	const std::string ignoreFile = settings::NoUpdateCheckFile();
+	const bool ignored = !ignoreFile.empty() && GetFileAttributesA(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES;
 
+	wchar_t buf[MAX_PATH];
 	GetModuleFileNameW(NULL, buf, MAX_PATH);
 	const std::wstring self = buf;
 	const std::wstring old = self + L".old";
@@ -1289,58 +1121,45 @@ bool SelfUpdate()
 	const std::wstring tmp = TempDir();
 	if (tmp.empty())
 		return false;
-	const std::wstring jsonFile = tmp + L"\\releases.json";
-	if (!HttpsDownload(L"api.github.com", L"/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile.c_str()))
-		return false;
-	const std::string json = ReadAll(jsonFile);
-	DeleteFileW(jsonFile.c_str());
-
-	std::string changelog;
-	bool required = false;
-	const std::string tag = Changelog(json, APP_VERSION, changelog, &required);
-	if (tag.empty() || (ignored && !required))
-		return false;
-
-	// Checked before asking, so nobody is offered a release that won't install. Required or not,
-	// nothing goes in without SHA256SUMS signed by a release key.
-	const std::wstring download = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/";
-	const std::wstring sumsFile = tmp + L"\\SHA256SUMS", sigFile = tmp + L"\\SHA256SUMS.sig";
-	const bool fetched = HttpsDownload(L"github.com", (download + L"SHA256SUMS").c_str(), sumsFile.c_str())
-		&& HttpsDownload(L"github.com", (download + L"SHA256SUMS.sig").c_str(), sigFile.c_str());
-	const std::string sums = ReadAll(sumsFile), sig = ReadAll(sigFile);
-	DeleteFileW(sumsFile.c_str());
-	DeleteFileW(sigFile.c_str());
-	std::string expected, err = "couldn't download its SHA256SUMS and SHA256SUMS.sig";
-	wchar_t wtext[2048];
-	if (!fetched || !relsig::CheckSums(sums, sig, tag, "bhoptools.exe", expected, err))
+	// Each download goes to the temp folder and is read back.
+	const upd::Fetch fetch = [&](const char* host, const std::string& path, std::string& body)
 	{
-		printf("not updating to %s: it couldn't be verified (%s)\n\n", tag.c_str(), err.c_str());
-		const std::string text = tag + " is out, but it couldn't be verified as signed by the bhoptools release key, so it won't be installed:\n\n"
-			+ err + "\n\nStarting the current version (" APP_VERSION ").";
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
+		const std::wstring file = tmp + L"\download.tmp";
+		const bool ok = HttpsDownload(std::wstring(host, host + strlen(host)).c_str(), std::wstring(path.begin(), path.end()).c_str(), file.c_str());
+		body = ok ? ReadAll(file) : std::string();
+		DeleteFileW(file.c_str());
+		return ok;
+	};
+	upd::Release r;
+	std::string err;
+	wchar_t wtext[2048];
+	const upd::Found found = upd::FindRelease(fetch, "bhoptools.exe", ignored, r, err);
+	if (found == upd::Found::Nothing)
+		return false;
+	if (found == upd::Found::Unverified)
+	{
+		printf("not updating to %s: it couldn't be verified (%s)\n\n", r.tag.c_str(), err.c_str());
+		MultiByteToWideChar(CP_UTF8, 0, upd::UnverifiedText(r, err, "Starting the current version (" APP_VERSION ").").c_str(), -1, wtext, 2048);
 		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONWARNING | MB_TOPMOST);
 		return false;
 	}
 
-	if (required)
+	MultiByteToWideChar(CP_UTF8, 0, upd::OfferText(r).c_str(), -1, wtext, 2048);
+	if (r.required)
 	{
-		const std::string text = "A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog;
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
 		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 	}
 	else
 	{
-		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog;
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
 		const int answer = AskUpdate(wtext, L"bhoptools update");
 		if (answer == IDCANCEL)
-		{
-			CreateDirectoryW(settingsDir.c_str(), NULL);
-			CloseHandle(CreateFileW(ignoreFile.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
-		}
+			settings::StopUpdateChecks();
 		if (answer != IDYES)
 			return false;
 	}
+	const std::string& tag = r.tag;
+	const std::string& expected = r.expected;
+	const std::wstring download = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/";
 
 	// Downloaded aside and checked before it goes next to the exe as .new.
 	const std::wstring exeFile = tmp + L"\\bhoptools.exe";
@@ -1377,123 +1196,12 @@ bool SelfUpdate()
 	PROCESS_INFORMATION pi = {};
 	return CreateProcessW(self.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) != 0;
 }
-#else
-// Offers the newest dev build, or installs the one bhoptools_install asked for. True when the new
-// copy was started.
-bool SelfUpdate()
-{
-	if (!strcmp(APP_VERSION, "dev"))
-		return false;
-	if (dev::Token().empty())
-	{
-		printf("No GitHub token, so no dev build updates. Save a read-only token for ddyfad/bhoptools-staging\n"
-			"in %s (STAGING.md says how).\n\n", dev::TokenPath().c_str());
-		return false;
-	}
-
-	const std::string ignoreFile = settings::Dir() + "\\no_update_check";
-	const bool ignored = GetFileAttributesA(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES;
-
-	char buf[MAX_PATH];
-	GetModuleFileNameA(NULL, buf, MAX_PATH);
-	const std::string self = buf;
-	const std::string old = self + ".old";
-	const std::string fresh = self + ".new";
-	// The previous update's exe was still running when it was renamed.
-	DeleteFileA(old.c_str());
-
-	const std::string wanted = dev::ReadState(dev::kInstallFile);
-	if (!wanted.empty())
-		dev::WriteState(dev::kInstallFile, "");
-
-	const std::string json = dev::FetchJson(wanted.empty() ? std::string(DEV_API "?per_page=50") : DEV_API "/tags/" + wanted, "release.json");
-	const std::vector<dev::Build> builds = dev::Builds(json);
-	std::string tag;
-	if (!wanted.empty())
-	{
-		if (builds.empty())
-		{
-			printf("couldn't get %s for bhoptools_install: no such dev build (only the newest 30 are kept), or the token doesn't work\n\n", wanted.c_str());
-			return false;
-		}
-		tag = wanted;
-		printf("installing %s, as bhoptools_install asked\n", tag.c_str());
-	}
-	else
-	{
-		if (json.empty())
-		{
-			printf("couldn't fetch the dev builds; check the token in %s\n\n", dev::TokenPath().c_str());
-			return false;
-		}
-		std::string changelog;
-		tag = dev::Changelog(builds, changelog);
-		if (tag.empty())
-			return false;
-		if (dev::Held())
-		{
-			printf("%s is out; staying on the build bhoptools_install put in (bhoptools_install latest to update)\n\n", tag.c_str());
-			return false;
-		}
-		if (ignored)
-			return false;
-		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog;
-		wchar_t wtext[2048];
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
-		const int answer = AskUpdate(wtext, L"bhoptools dev update");
-		if (answer == IDCANCEL)
-		{
-			CreateDirectoryA(settings::Dir().c_str(), NULL);
-			CloseHandle(CreateFileA(ignoreFile.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
-		}
-		if (answer != IDYES)
-			return false;
-	}
-
-	const dev::Build* build = dev::Find(builds, tag);
-	dev::Asset asset;
-	if (!build || !dev::FindAsset(json, *build, "bhoptools-dev.exe", asset) || !dev::Download(asset.url, true, fresh))
-	{
-		DeleteFileA(fresh.c_str());
-		printf("downloading %s failed, starting the current version\n", tag.c_str());
-		return false;
-	}
-	const std::string exe = dev::ReadAll(fresh);
-	std::string err = "it isn't an exe";
-	if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z' || !dev::CheckAsset(asset, exe, err))
-	{
-		DeleteFileA(fresh.c_str());
-		printf("not installing %s: %s. Starting the current version\n", tag.c_str(), err.c_str());
-		return false;
-	}
-	if (asset.sha256.empty())
-		printf("%s: the release lists no sha256 for bhoptools-dev.exe, only its size was checked\n", tag.c_str());
-
-	if (!MoveFileExA(self.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)
-			|| !MoveFileExA(fresh.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING))
-	{
-		MoveFileExA(old.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING);
-		printf("couldn't replace the exe, starting the current version\n");
-		return false;
-	}
-	if (!wanted.empty())
-		dev::WriteState(dev::kHeldFile, tag);
-	STARTUPINFOA si = {};
-	PROCESS_INFORMATION pi = {};
-	return CreateProcessA(self.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) != 0;
-}
-#endif
 
 // Credits: https://github.com/alkatrazbhop/BunnyhopAPE
 int main()
 {
-#ifdef BHOPTOOLS_DEV
-	SetConsoleTitle("bhoptools dev x64");
-	printf("bhoptools dev " APP_VERSION "\nhttps://github.com/ddyfad/bhoptools-staging\n\n");
-#else
 	SetConsoleTitle("bhoptools x64");
 	printf("bhoptools " APP_VERSION "\nhttps://github.com/ddyfad/bhoptools\n\n");
-#endif
 	if (SelfUpdate())
 		return 0;
 

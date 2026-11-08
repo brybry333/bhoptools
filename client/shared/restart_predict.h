@@ -1,6 +1,8 @@
 // Decided on first sight of the command, then replaced by the server's ack.
 #pragma once
 
+#include "cmd_log.h"
+
 #include <climits>
 
 static const int RS_IMPULSE_RESTART  = 157;  // sm_r, sm_restart, sm_start
@@ -112,19 +114,11 @@ struct RsPredictor {
 		return d;
 	}
 
-	RsRecord* Find(int key)
-	{
-		for (int i = 0; i < logCount; ++i) if (log[i].key == key) return &log[i];
-		return nullptr;
-	}
+	RsRecord* Find(int key) { return KeyedFind(log, logCount, key); }
 
 	RsRecord* Add(int key, bool apply, const RsDest& d)
 	{
-		if (logCount == kLog) {
-			for (int i = 1; i < kLog; ++i) log[i - 1] = log[i];
-			--logCount;
-		}
-		RsRecord& r = log[logCount++];
+		RsRecord& r = KeyedPush(log, logCount);
 		r.key = key;
 		r.apply = apply;
 		r.dest = d;

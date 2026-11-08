@@ -1,6 +1,5 @@
 // Signed releases: each public release carries SHA256SUMS, signed with `ssh-keygen -Y sign` by a
 // pinned release key (SHA256SUMS.sig). The updater installs nothing the signed file doesn't list.
-// See STAGING.md, "Promoting".
 #pragma once
 
 #include <cstddef>

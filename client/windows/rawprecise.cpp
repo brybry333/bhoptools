@@ -381,9 +381,6 @@ void RegisterCommands()
 	}
 	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
 		{ "bhoptools_rawprecise", "rawinput2 precise: mouse reports timestamped on their own thread, each tick takes its own (0/1, off by default).", Cmd_RawPrecise },
-#ifdef BHOPTOOLS_DEV
-		{ "bhoptools_rawcompare", "Records for N seconds (default 5) what each tick got with precise against rawinput2's even spread, prints the difference and writes rawcompare.csv.", Cmd_RawCompare },
-#endif
 	};
 	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];

@@ -1,6 +1,8 @@
 // Mirrors shavit-core's style key blocking.
 #pragma once
 
+#include "cmd_log.h"
+
 #include <climits>
 
 // bhoptools_keys flags; must match the server plugin.
@@ -135,12 +137,8 @@ struct SkTracker {
 	// The state after command `cmd`, in order of commands; one out of order replaces what it overtook.
 	void AddReport(int cmd, int flags, int combo)
 	{
-		while (reportCount > 0 && reports[reportCount - 1].cmd >= cmd) --reportCount;
-		if (reportCount == kReports) {
-			for (int i = 1; i < kReports; ++i) reports[i - 1] = reports[i];
-			--reportCount;
-		}
-		reports[reportCount++] = { cmd, flags, ++seq, { (flags & SK_ALLKEYS) != 0, combo } };
+		Report& r = CmdReportInsert(reports, reportCount, cmd);
+		r = { cmd, flags, ++seq, { (flags & SK_ALLKEYS) != 0, combo } };
 	}
 
 	const Report* ReportBefore(int cmd) const

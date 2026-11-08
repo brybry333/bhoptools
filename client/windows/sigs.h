@@ -110,7 +110,7 @@ static const int VT_CHLClient_LevelInitPreEntity = 5; // (const char* mapname)
 
 // Options tab: GameUI.dll's vgui_controls, vgui2.dll's IPanel/IInput and vguimatsurface.dll's
 // CMatSystemSurface ("VGUI_Surface030"). MSVC emits one destructor slot and orders overloads
-// differently, so these differ from Linux; tests/gameui_probe checks them.
+// differently, so these differ from Linux.
 static const int VT_Panel_GetVPanel          = 0;
 static const int VT_Panel_Paint              = 130;
 static const int VT_Panel_PerformLayout      = 134;
@@ -126,6 +126,10 @@ static const int VT_IPanel_SetVisible        = 14;
 static const int VT_IPanel_IsVisible         = 15;
 static const int VT_IPanel_GetChildCount     = 17;
 static const int VT_IPanel_GetChild          = 18;
+// The showkeys overlay. IPanel.h's order plus the destructor slot, as for the five above.
+static const int VT_IPanel_GetSize           = 5;  // (VPANEL, int& wide, int& tall)
+static const int VT_IPanel_GetName           = 36; // (VPANEL) -> const char*
+static const int VT_IPanel_PaintTraverse     = 41; // (VPANEL, bool forceRepaint, bool allowForce)
 static const int VT_IInput_GetCursorPos      = 8;
 static const int VT_Surface_DrawSetColor     = 11; // (int r, g, b, a)
 static const int VT_Surface_DrawFilledRect   = 12;

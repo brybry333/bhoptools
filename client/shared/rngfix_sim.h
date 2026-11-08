@@ -121,6 +121,7 @@ struct RngRuntime {
 	const PredMap*               otherFor = nullptr;
 	std::vector<RngOtherTrigger> other;
 	std::vector<int>             scratch;
+	std::vector<int>             candidates; // PredGatherCandidates' output for RngFindTriggers
 
 	RngRuntime() { for (int& t : ringKey) t = INT_MIN; }
 };
@@ -391,13 +392,13 @@ static bool RngTracePlayerBBoxForGround(RngRuntime& r, const float origin[3], co
 }
 
 // Disabled triggers have no FSOLID_TRIGGER, so they aren't enumerated.
-static void RngFindTriggers(PredRuntime& rt, const float feet[3], const float mins[3],
+static void RngFindTriggers(RngRuntime& r, PredRuntime& rt, const float feet[3], const float mins[3],
 	const float maxs[3], std::vector<int>& out)
 {
 	out.clear();
 	const PredMap& map = *rt.map;
-	PredGatherCandidates(rt, feet, mins, maxs);
-	for (int i : rt.candidates) {
+	PredGatherCandidates(rt, feet, mins, maxs, r.candidates);
+	for (int i : r.candidates) {
 		const PredSimEnt& e = map.sim[(size_t)i];
 		const PredEntState& st = rt.world.ents[(size_t)i];
 		if (!PredIsTriggerClass(e.cls) || st.removed || st.disabled) continue;
@@ -433,7 +434,7 @@ static bool RngTriggerBlocksStairs(RngRuntime& r, PredRuntime* rt, PredPlayerIO&
 {
 	if (!rt) return false;
 	const PredMap& map = *rt->map;
-	RngFindTriggers(*rt, start, mins, maxs, r.scratch);
+	RngFindTriggers(r, *rt, start, mins, maxs, r.scratch);
 	for (int i : r.scratch)
 		if (PredPassesFilters(map, rt->world, map.sim[(size_t)i], io)) return true;
 
@@ -441,8 +442,7 @@ static bool RngTriggerBlocksStairs(RngRuntime& r, PredRuntime* rt, PredPlayerIO&
 	const bool client = (*io.flags & FL_CLIENT_BIT) != 0;
 	for (const RngOtherTrigger& t : r.other) {
 		if (!PredBoxInModel(map, t.modelIndex, t.xf, start, mins, maxs, -1)) continue;
-		const int sf = t.spawnflags;
-		if (((sf & 0x40) || ((sf & 0x01) && client)) && !(sf & 0x20)) return true;
+		if (PredSpawnflagsTouchPlayer(t.spawnflags, client)) return true;
 	}
 	return false;
 }
@@ -570,7 +570,7 @@ static bool RngDoTriggerjumpFix(RngRuntime& r, PredRuntime* rt, PredPlayerIO& io
 
 	// All found first, then touched, like rngfix's ArrayList.
 	std::vector<int> triggers;
-	RngFindTriggers(*rt, landingPoint, landingMins, landingMaxsBelow, triggers);
+	RngFindTriggers(r, *rt, landingPoint, landingMins, landingMaxsBelow, triggers);
 
 	bool didSomething = false;
 	for (int i : triggers) {

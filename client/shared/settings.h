@@ -1,5 +1,5 @@
 // The player's settings, kept in a small key=value file between launches: %APPDATA%\bhoptools on
-// Windows, $XDG_CONFIG_HOME/bhoptools (~/.config) on Linux; bhoptools-dev for the dev build. Game thread only.
+// Windows, $XDG_CONFIG_HOME/bhoptools (~/.config) on Linux. Game thread only.
 #pragma once
 
 #include <functional>
@@ -28,6 +28,12 @@ void Changed();
 void SetApply(std::function<void()> fn);
 // The folder settings.cfg lives in, empty if there's none.
 std::string Dir();
+// While this file exists nobody is asked about updates: the launchers check it before the game
+// starts, and the Options tab's updates setting is this file. Empty if there's no settings folder.
+std::string NoUpdateCheckFile();
+// "Don't ask again" (Cancel on Windows, "Ignore forever" on Linux): creates that file. Usable
+// before Load(), from the launcher.
+void StopUpdateChecks();
 
 // Mouse interpolation decides m_rawinput: on makes it 1 if it's 0, off makes it 0. Called on
 // each level load, after config.cfg has set it, and on every change. With nothing saved yet the

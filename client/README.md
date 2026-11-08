@@ -90,8 +90,7 @@ Windows and Linux
 ### Building
 - `git clone --recurse-submodules https://github.com/ddyfad/bhoptools.git`
 - Windows: build `bhoptools.sln` with Visual Studio 2022+ (Release x64).
-- Linux: `make -C linux`, then `make -C tests test` for the offline prediction tests.
-- `python3 tests/gameui_probe/probe.py` checks the Options tab's vtable slots and offsets against the installed game's Linux and Windows binaries (needs `llvm-objdump`).
+- Linux: `make -C linux`, then `make -C tests test` for the release signature test.
 - `shared/` is the prediction code, `windows/` and `linux/` load it into the game.
 
 ### Credits

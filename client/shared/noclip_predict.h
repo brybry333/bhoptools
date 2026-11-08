@@ -1,6 +1,8 @@
 // Reapplied on every replay of the impulse's command.
 #pragma once
 
+#include "cmd_log.h"
+
 static const int NC_IMPULSE_TOGGLE = 154;  // sm_nc, sm_noclip, sm_noclipme, sm_prac, sm_practice
 static const int NC_IMPULSE_ON     = 155;  // +noclip
 static const int NC_IMPULSE_OFF    = 156;  // -noclip
@@ -40,20 +42,12 @@ struct NcLog {
 
 	void Clear() { count = 0; }
 
-	NcRecord* Find(int key)
-	{
-		for (int i = 0; i < count; ++i) if (r[i].key == key) return &r[i];
-		return nullptr;
-	}
+	NcRecord* Find(int key) { return KeyedFind(r, count, key); }
 
 	// Dropping the oldest is fine: a replay never goes back 32 noclip presses.
 	NcRecord* Add(int key, bool apply)
 	{
-		if (count == kSize) {
-			for (int i = 1; i < kSize; ++i) r[i - 1] = r[i];
-			--count;
-		}
-		NcRecord& n = r[count++];
+		NcRecord& n = KeyedPush(r, count);
 		n.key = key;
 		n.apply = apply;
 		return &n;

@@ -1,6 +1,8 @@
 // What shavit does with its zones once the trigger sim touches them.
 #pragma once
 
+#include "hexparse.h"
+
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -258,24 +260,6 @@ static inline bool ZsStartTimerClamp(const ZsZone& z, const ZsSettings& s, const
 	return (type == 1 || type >= 3) && ZsClampPrestrafe(s, st, type, v);
 }
 
-// Hex float bits as SourcePawn's %x writes them, a negative cell with a minus sign.
-static inline float ZsHexFloat(const char* s)
-{
-	const bool neg = *s == '-';
-	if (neg) ++s;
-	uint32_t bits = 0;
-	for (; *s; ++s) {
-		const char ch = *s;
-		const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
-		if (d < 0) break;
-		bits = bits << 4 | (uint32_t)d;
-	}
-	if (neg) bits = 0u - bits;
-	float f;
-	memcpy(&f, &bits, 4);
-	return std::isfinite(f) && fabsf(f) < 1e6f ? f : 0.0f;
-}
-
 // One zone's line of the published list: type track form data hammerid origin[3] half[3] dest[3].
 static inline bool ZsParseZone(const char* const* f, int n, ZsZone& z)
 {
@@ -286,9 +270,9 @@ static inline bool ZsParseZone(const char* const* f, int n, ZsZone& z)
 	z.data = atoi(f[3]);
 	z.hammerId = atoi(f[4]);
 	for (int c = 0; c < 3; ++c) {
-		z.origin[c] = ZsHexFloat(f[5 + c]);
-		z.half[c] = ZsHexFloat(f[8 + c]);
-		z.dest[c] = ZsHexFloat(f[11 + c]);
+		z.origin[c] = HexFloatSetting(f[5 + c]);
+		z.half[c] = HexFloatSetting(f[8 + c]);
+		z.dest[c] = HexFloatSetting(f[11 + c]);
 	}
 	z.sim = -1;
 	return z.type >= 0 && z.type < ZS_TYPES;
@@ -328,12 +312,12 @@ static inline bool ZsParseSettings(const char* const* f, int n, ZsSettings& s)
 	if (n < 9) return false;
 	s.track = atoi(f[0]);
 	s.flags = atoi(f[1]);
-	s.gravity = ZsHexFloat(f[2]);
-	s.airaccelerate = ZsHexFloat(f[3]);
+	s.gravity = HexFloatSetting(f[2]);
+	s.airaccelerate = HexFloatSetting(f[3]);
 	s.prespeed = atoi(f[4]);
 	s.prespeedType = atoi(f[5]);
 	s.blockPrejump = atoi(f[6]);
 	s.noZAxisSpeed = atoi(f[7]);
-	s.limit = ZsHexFloat(f[8]);
+	s.limit = HexFloatSetting(f[8]);
 	return true;
 }

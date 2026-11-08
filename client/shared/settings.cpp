@@ -41,12 +41,7 @@ const Field kFields[] = {
 
 }
 
-// bhoptools-dev has a folder of its own, so it never shares settings or update state with bhoptools.
-#ifdef BHOPTOOLS_DEV
-#define SETTINGS_DIR_NAME "bhoptools-dev"
-#else
 #define SETTINGS_DIR_NAME "bhoptools"
-#endif
 
 std::string Dir()
 {
@@ -61,18 +56,27 @@ std::string Dir()
 #endif
 }
 
-namespace {
-
 // The launcher reads no_update_check before the game starts, so this setting lives in that file, not settings.cfg.
-std::string UpdatesFile()
+std::string NoUpdateCheckFile()
 {
 	const std::string dir = Dir();
 	return dir.empty() ? dir : dir + "/no_update_check";
 }
 
+namespace {
+
+void MakeDir(const std::string& dir)
+{
+#ifdef _WIN32
+	_mkdir(dir.c_str());
+#else
+	mkdir(dir.c_str(), 0755);
+#endif
+}
+
 void LoadUpdates()
 {
-	const std::string file = UpdatesFile();
+	const std::string file = NoUpdateCheckFile();
 	FILE* f = file.empty() ? nullptr : fopen(file.c_str(), "r");
 	g_settings.updates = f == nullptr;
 	if (f) fclose(f);
@@ -80,12 +84,13 @@ void LoadUpdates()
 
 void SaveUpdates()
 {
-	const std::string file = UpdatesFile();
+	const std::string file = NoUpdateCheckFile();
 	if (file.empty()) return;
 	if (g_settings.updates) {
 		remove(file.c_str());
 		return;
 	}
+	MakeDir(Dir());
 	FILE* f = fopen(file.c_str(), "w");
 	if (f) fclose(f);
 }
@@ -100,11 +105,7 @@ void Save()
 {
 	const std::string dir = Dir();
 	if (dir.empty()) return;
-#ifdef _WIN32
-	_mkdir(dir.c_str());
-#else
-	mkdir(dir.c_str(), 0755);
-#endif
+	MakeDir(dir);
 	// Written aside and renamed over, so a crash mid-write keeps the old file.
 	const std::string path = Path(), tmp = path + ".tmp";
 	FILE* f = fopen(tmp.c_str(), "w");
@@ -126,24 +127,35 @@ void Save()
 
 Settings& Get() { return g_settings; }
 
+void StopUpdateChecks()
+{
+	g_settings.updates = false;
+	SaveUpdates();
+}
+
 void Load()
 {
 	const std::string path = Path();
 	FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "r");
 	LoadUpdates();
-	if (!f) return;
-	char line[128];
-	while (fgets(line, sizeof(line), f)) {
-		char* eq = strchr(line, '=');
-		if (!eq) continue;
-		*eq = 0;
-		for (const Field& fl : kFields)
-			if (!strcmp(line, fl.key)) {
-				g_settings.*fl.value = atoi(eq + 1) != 0;
-				if (fl.value == &Settings::rawinput) g_rawinputSaved = true;
-			}
+	if (f) {
+		char line[128];
+		while (fgets(line, sizeof(line), f)) {
+			char* eq = strchr(line, '=');
+			if (!eq) continue;
+			*eq = 0;
+			for (const Field& fl : kFields)
+				if (!strcmp(line, fl.key)) {
+					g_settings.*fl.value = atoi(eq + 1) != 0;
+					if (fl.value == &Settings::rawinput) g_rawinputSaved = true;
+				}
+		}
+		fclose(f);
 	}
-	fclose(f);
+	// Not in the public Options tab, so a value saved by an older build couldn't be changed back: the
+	// polling rate fix is always on and the trainers are redrawn every tick
+	g_settings.pollfix = true;
+	g_settings.jsframe = false;
 	g_lastRawinput = g_settings.rawinput;
 }
 
@@ -162,9 +174,8 @@ void ApplyRawInput(bool levelLoad)
 	void* cvar = CreateInterfaceIn(VSTDLIB_MODULE, "VEngineCvar004");
 	void* engine = CreateInterfaceIn(ENGINE_MODULE, "VEngineClient014");
 	char* var = cvar ? VFunc<char* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "m_rawinput") : nullptr;
-	if (!var || !engine || strcmp(*reinterpret_cast<const char* const*>(var + 0x18), "m_rawinput")) return;  // m_pszName
-	char* parent = *reinterpret_cast<char**>(var + OFF_ConVar_Parent);
-	const int value = *reinterpret_cast<const int*>((parent ? parent : var) + OFF_ConVar_IntValue);
+	if (!var || !engine || strcmp(*reinterpret_cast<const char* const*>(var + OFF_ConVar_Name), "m_rawinput")) return;
+	const int value = *reinterpret_cast<const int*>(ConVarValueOwner(var) + OFF_ConVar_IntValue);
 	if (!g_rawinputSaved) {
 		if (!levelLoad) return;
 		g_rawinputSaved = true;

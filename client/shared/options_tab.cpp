@@ -1,4 +1,5 @@
 #include "options_tab.h"
+#include "hudkeys.h"
 #include "settings.h"
 #include "sigs.h"
 #include "utils.h"
@@ -32,19 +33,19 @@ typedef void   (*SetTextFontFn)(void*, HFont);
 typedef void   (*PrintTextFn)(void*, const wchar_t*, int, int);
 typedef HFont  (*CreateFontFn)(void*);
 typedef bool   (*SetFontGlyphSetFn)(void*, HFont, const char*, int, int, int, int, int, int, int);
+typedef void   (*PaintTraverseFn)(void*, VPANEL, bool, bool);
+typedef const char* (*GetNameFn)(void*, VPANEL);
+typedef void   (*GetSizeFn)(void*, VPANEL, int&, int&);
 
 const int FONTFLAG_ANTIALIAS = 0x010;
+const int FONTFLAG_OUTLINE = 0x200;
 #ifdef _WIN32
 const char kFace[] = "Tahoma";
 #else
 // Steam's runtime ships it; Tahoma would go through fontconfig to whatever it picks.
 const char kFace[] = "DejaVu Sans";
 #endif
-#ifdef BHOPTOOLS_DEV
-const char kTitle[] = "bhoptools dev";
-#else
 const char kTitle[] = "bhoptools";
-#endif
 
 struct Row {
 	bool Settings::* value;
@@ -53,16 +54,12 @@ struct Row {
 };
 const Row kRows[] = {
 	{ &Settings::rawinput,  nullptr,            L"rawinput2" },
+#if defined(_WIN32) && !defined(BHOPTOOLS_NO_RAWPRECISE)
+	{ &Settings::rawprecise, nullptr,           L"rawinput2 precise" },
+#endif
 	{ &Settings::predict,   nullptr,            L"prediction" },
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
-	{ &Settings::jsframe,   nullptr,            L"jumpstats trainers every frame (off: every tick)" },
 	{ &Settings::updates,   nullptr,            L"ask about updates when starting" },
-#ifdef _WIN32
-	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: no fps loss while moving the mouse)" },
-#ifndef BHOPTOOLS_NO_RAWPRECISE
-	{ &Settings::rawprecise, nullptr,           L"rawinput2 precise (each tick gets the mouse movement from its own slice of time)" },
-#endif
-#endif
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 const int kLeft = 20, kTop = 20, kRowTall = 28, kBox = 14, kWidth = 560;
@@ -154,6 +151,108 @@ void Hooked_Paint(void* self)
 	Draw(page);
 }
 
+// The showkeys overlay: drawn after the client's FocusOverlayPanel, which covers the screen above the HUD and
+// below the menus, through IPanel::PaintTraverse on vgui2's one IPanel.
+struct KeysState {
+	bool on;
+	std::vector<std::wstring> lines;
+	float x, y;
+	double time;
+};
+KeysState g_keys;
+void** g_panelVt;
+PaintTraverseFn oPaintTraverse;
+VPANEL g_overlay;
+HFont g_keysFont;
+int g_keysTall, g_keysScreenW, g_keysScreenH;
+
+const int FONTFLAG_ADDITIVE = 0x100;
+// CS:S's centre print is clientscheme.res' Trebuchet24: Trebuchet MS, 24 tall up to 1199 lines, weight 900,
+// antialiased and additive. Linux has no Trebuchet MS, so it gets the same face as the Options tab.
+#ifdef _WIN32
+const char kKeysFace[] = "Trebuchet MS";
+#else
+const char kKeysFace[] = "DejaVu Sans";
+#endif
+
+// The keys' text only holds the BMP: fullwidth letters, U+3000, arrows
+std::vector<std::wstring> WideLines(const std::string& s)
+{
+	std::vector<std::wstring> lines(1);
+	for (size_t i = 0; i < s.size();) {
+		const unsigned char c = (unsigned char)s[i];
+		unsigned cp;
+		int n;
+		if (c < 0x80) { cp = c; n = 1; }
+		else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+		else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+		else { ++i; continue; }
+		if (i + n > s.size()) break;
+		for (int k = 1; k < n; ++k) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+		i += n;
+		if (cp == '\n') lines.emplace_back();
+		else lines.back() += (wchar_t)cp;
+	}
+	return lines;
+}
+
+void DrawKeys(VPANEL overlay)
+{
+	if (!g_keys.on || MonotonicSeconds() - g_keys.time > 1.0) return;
+	int w = 0, h = 0;
+	VFunc<GetSizeFn>(g_panel, VT_IPanel_GetSize)(g_panel, overlay, w, h);
+	if (w <= 0 || h <= 0) return;
+
+	// The centre print's size: 24 up to 1199 lines, scaled above that
+	const int tall = h < 1200 ? 24 : h * 24 / 1080;
+	if (!g_keysFont) g_keysFont = VFunc<CreateFontFn>(g_surface, VT_Surface_CreateFont)(g_surface);
+	if (!g_keysFont) return;
+	// A video mode change drops the font's glyphs; it also changes the screen size, so set them again then
+	if (tall != g_keysTall || w != g_keysScreenW || h != g_keysScreenH) {
+		VFunc<SetFontGlyphSetFn>(g_surface, VT_Surface_SetFontGlyphSet)(
+			g_surface, g_keysFont, kKeysFace, tall, 900, 0, 0, FONTFLAG_ANTIALIAS | FONTFLAG_ADDITIVE, 0, 0);
+		g_keysTall = tall;
+		g_keysScreenW = w;
+		g_keysScreenH = h;
+	}
+	VFunc<SetTextFontFn>(g_surface, VT_Surface_DrawSetTextFont)(g_surface, g_keysFont);
+
+	// shavit's lines are padded to line up, so they start at the same x. A coordinate left at -1 centres on
+	// it, with fullwidth characters taken as a full em and the rest as half.
+	int widest = 0;
+	for (const std::wstring& line : g_keys.lines) {
+		int width = 0;
+		for (wchar_t c : line) width += c >= 0x2000 ? tall : tall / 2;
+		if (width > widest) widest = width;
+	}
+	const int count = (int)g_keys.lines.size();
+	const int left = g_keys.x < 0.0f ? (w - widest) / 2 : (int)(g_keys.x * w);
+	const int top = g_keys.y < 0.0f ? (h - count * tall) / 2 : (int)(g_keys.y * h);
+	for (int i = 0; i < count; ++i) Text(left, top + i * tall, g_keys.lines[i].c_str(), 255, 255, 255);
+}
+
+void Hooked_PaintTraverse(void* self, VPANEL panel, bool forceRepaint, bool allowForce)
+{
+	oPaintTraverse(self, panel, forceRepaint, allowForce);
+	if (!g_overlay) {
+		const char* name = VFunc<GetNameFn>(g_panel, VT_IPanel_GetName)(g_panel, panel);
+		if (name && strcmp(name, "FocusOverlayPanel") == 0) g_overlay = panel;
+	}
+	if (panel == g_overlay) DrawKeys(panel);
+}
+
+void InstallOverlay()
+{
+	if (g_panelVt || !g_panel || !g_surface) return;
+	void** vt = *reinterpret_cast<void***>(g_panel);
+	oPaintTraverse = reinterpret_cast<PaintTraverseFn>(vt[VT_IPanel_PaintTraverse]);
+	if (!PatchPointer(&vt[VT_IPanel_PaintTraverse], reinterpret_cast<void*>(&Hooked_PaintTraverse))) {
+		CoreLog("options: couldn't hook IPanel::PaintTraverse, the showkeys stay with the server");
+		return;
+	}
+	g_panelVt = vt;
+}
+
 void Hooked_MousePressed(void* self, int code)
 {
 	const int row = RowAt(VPanelOf(self));
@@ -197,6 +296,8 @@ bool Install()
 	g_panel = CreateInterfaceIn(VGUI_MODULE, "VGUI_Panel009");
 	g_input = CreateInterfaceIn(VGUI_MODULE, "VGUI_Input005");
 	g_surface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
+	// The showkeys overlay only needs vgui2 and the surface, not GameUI
+	InstallOverlay();
 	void** host = g_panel && g_input && g_surface ? FindVTable(GAMEUI_MODULE, RTTI_OptionsSubMultiplayer) : nullptr;
 	void** sheet = host ? FindVTable(GAMEUI_MODULE, RTTI_PropertySheet) : nullptr;
 	if (!sheet) return false;
@@ -224,9 +325,32 @@ bool Install()
 	return true;
 }
 
+void SetKeys(const std::string& text, float x, float y)
+{
+	g_keys.on = true;
+	g_keys.lines = WideLines(text);
+	g_keys.x = x;
+	g_keys.y = y;
+	g_keys.time = MonotonicSeconds();
+}
+
+void ClearKeys()
+{
+	g_keys.on = false;
+}
+
+bool KeysOverlay()
+{
+	return g_panelVt != nullptr;
+}
+
 #ifdef _WIN32
 void Uninstall()
 {
+	if (g_panelVt) {
+		PatchPointer(&g_panelVt[VT_IPanel_PaintTraverse], reinterpret_cast<void*>(oPaintTraverse));
+		g_panelVt = nullptr;
+	}
 	if (!g_sheetVt) return;
 	PatchPointer(&g_hostVt[VT_Panel_Paint], reinterpret_cast<void*>(oPaint));
 	PatchPointer(&g_hostVt[VT_Panel_OnMousePressed], reinterpret_cast<void*>(oMousePressed));

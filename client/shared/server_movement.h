@@ -110,7 +110,7 @@ static inline bool LandfixSjJumpLifts(bool havePrev, int prevGround, int ground)
 // player's hull traced with MASK_PLAYERSOLID past other players, false when it can't trace. From 2 above
 // the origin to 2.1 below it must hit ground, and 1.5 above that must be clear.
 template <typename Hull>
-static inline bool LandfixSjZ(const float origin[3], Hull hull, float* out)
+static inline bool LandfixSjZ(const float origin[3], Hull&& hull, float* out)
 {
 	float above[3] = { origin[0], origin[1], origin[2] + 2.0f };
 	float below[3] = { origin[0], origin[1], origin[2] - 2.1f };

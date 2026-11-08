@@ -2,7 +2,7 @@
 # bash .github/check-release.sh <dir> <tag>, from the repository root, before a client release
 # is published: writes $SUMS_SIGNATURE to <dir>/SHA256SUMS.sig, checks it against
 # .github/release_signers with ssh-keygen, then runs the client's own check (check_sums: the
-# pinned keys, the security key's PIN flag, the tag and every file). See STAGING.md.
+# pinned keys, the security key's PIN flag, the tag and every file).
 set -euo pipefail
 dir=$1
 tag=$2

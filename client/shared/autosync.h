@@ -1,6 +1,8 @@
 // Mirrors Nimmy2222/shavit-syncstyle 1.2.0's OnPlayerRunCmd.
 #pragma once
 
+#include "cmd_log.h"
+
 #include <climits>
 #include <cmath>
 
@@ -106,12 +108,8 @@ struct AsTracker {
 	// What applies after command `cmd`; zero <= 0 for no teleport known.
 	void AddReport(int cmd, bool on, int order, int zero)
 	{
-		while (reportCount > 0 && reports[reportCount - 1].cmd >= cmd) --reportCount;
-		if (reportCount == kReports) {
-			for (int i = 1; i < kReports; ++i) reports[i - 1] = reports[i];
-			--reportCount;
-		}
-		reports[reportCount++] = { cmd, ++seq, on, order, zero > 0 ? zero : INT_MIN };
+		Report& r = CmdReportInsert(reports, reportCount, cmd);
+		r = { cmd, ++seq, on, order, zero > 0 ? zero : INT_MIN };
 	}
 
 	int ReportBefore(int cmd) const

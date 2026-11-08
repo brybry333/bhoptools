@@ -466,10 +466,6 @@ void RegisterCommands()
 	}
 	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
 		{ "bhoptools_pollfix", "High polling rate fix: no legacy mouse messages in game, the message pump filtered in menus (0/1, on by default).", Cmd_PollFix },
-#ifdef BHOPTOOLS_DEV
-		{ "bhoptools_pumpstats", "Print and reset what the message pump cost since the last print.", Cmd_PumpStats },
-		{ "bhoptools_nolegacy", "With the fix on, 0 leaves only the pump filtering, for comparing (on by default, not saved).", Cmd_NoLegacy },
-#endif
 	};
 	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "hexparse.h"
+
 #include <clocale>
 #include <cmath>
 #include <cstdint>
@@ -47,14 +49,6 @@ struct Token {
 
 inline bool IsIdStart(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 inline bool IsDigit(char c)   { return c >= '0' && c <= '9'; }
-inline int  HexVal(char c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	return -1;
-}
-
 // Rounded to double then float like Squirrel's scstrtod, whatever the locale's decimal point.
 inline float ParseFloat(const std::string& s)
 {
@@ -115,7 +109,7 @@ inline bool Tokenize(const char* src, size_t len, std::vector<Token>& out)
 				p += 2;
 				uint64_t v = 0;
 				size_t d0 = p;
-				while (p < len && HexVal(src[p]) >= 0) { v = v * 16u + (uint64_t)HexVal(src[p]); ++p; }
+				while (p < len && HexDigit(src[p]) >= 0) { v = v * 16u + (uint64_t)HexDigit(src[p]); ++p; }
 				if (p == d0) { bad(p); continue; }
 				t.type = TK_INT;
 				t.i = (int64_t)v;

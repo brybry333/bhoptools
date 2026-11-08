@@ -25,7 +25,8 @@ void Attach(void* client);
 void Detach();
 #endif
 
-DispatchUserMessageFn OriginalDispatch();
+// Attached: Dispatch() reaches the client.
+bool CanDispatch();
 
 // fn returning true keeps the message from the game.
 void Watch(const char* name, bool (*fn)(const BfRead&));
@@ -35,7 +36,8 @@ int WatchedMessage();
 
 // A user message's id, -1 if it isn't registered (yet).
 int UserMessageId(const char* name);
-// Hands the client a user message as if the server had sent it, past our own hook.
+// Hands the client a user message as if the server had sent it, past our own hook. Every message
+// bhoptools makes up goes through here (speed, keys, jumpstats, chat, menus).
 void Dispatch(int id, const void* data, int len);
 
 // hud_speed and hud_keys. On the thread that runs console commands.

@@ -46,9 +46,21 @@ struct ConCommandX {
 static_assert(offsetof(ConCommandX, name) == 0x18 && offsetof(ConCommandX, flags) == 0x28
 	&& offsetof(ConCommandX, callback) == 0x30 && offsetof(ConCommandX, bits) == 0x40, "ConCommand layout");
 
-// ConVar: the parent (itself unless it's a duplicate) and the int value.
-static const ptrdiff_t OFF_ConVar_Parent   = 0x38;
-static const ptrdiff_t OFF_ConVar_IntValue = 0x58;
+// ConVar: its name (ConCommandBase::m_pszName), the parent that holds the value (null when this is
+// the original; the secondary IConVar vptr sits at +0x30), and the float and int values. The data
+// layout is the same on both ABIs.
+static const ptrdiff_t OFF_ConVar_Name       = 0x18;
+static const ptrdiff_t OFF_ConVar_Parent     = 0x38;
+static const ptrdiff_t OFF_ConVar_FloatValue = 0x54;
+static const ptrdiff_t OFF_ConVar_IntValue   = 0x58;
+static_assert(OFF_ConVar_Name == offsetof(ConCommandX, name), "ConVar name");
+
+// The ConVar whose value fields count: the parent of a duplicate, else the ConVar itself.
+inline char* ConVarValueOwner(char* var)
+{
+	char* parent = *reinterpret_cast<char**>(var + OFF_ConVar_Parent);
+	return parent ? parent : var;
+}
 
 struct CCommandX {
 	int         argc;

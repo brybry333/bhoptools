@@ -185,7 +185,6 @@ static const ptrdiff_t OFF_LinuxFont_FTFace    = 0x8a0;
 static const int VT_CHudChatHistory_Paint = 131;
 
 // Options tab: GameUI.so's vgui_controls, vgui2.so's IPanel/IInput and the surface above.
-// tests/gameui_probe checks these against the installed game.
 static const int VT_Panel_GetVPanel          = 0;
 static const int VT_Panel_Paint              = 131;
 static const int VT_Panel_PerformLayout      = 135;
@@ -201,6 +200,10 @@ static const int VT_IPanel_SetVisible        = 15;
 static const int VT_IPanel_IsVisible         = 16;
 static const int VT_IPanel_GetChildCount     = 18;
 static const int VT_IPanel_GetChild          = 19;
+// The showkeys overlay. IPanel.h's order plus the two destructor slots, as for the five above.
+static const int VT_IPanel_GetSize           = 6;  // (VPANEL, int& wide, int& tall)
+static const int VT_IPanel_GetName           = 37; // (VPANEL) -> const char*
+static const int VT_IPanel_PaintTraverse     = 42; // (VPANEL, bool forceRepaint, bool allowForce)
 static const int VT_IInput_GetCursorPos      = 9;
 static const int VT_Surface_DrawSetColor     = 10; // (int r, g, b, a)
 static const int VT_Surface_DrawFilledRect   = 12;
