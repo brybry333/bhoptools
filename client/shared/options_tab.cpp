@@ -36,6 +36,7 @@ typedef bool   (*SetFontGlyphSetFn)(void*, HFont, const char*, int, int, int, in
 typedef void   (*PaintTraverseFn)(void*, VPANEL, bool, bool);
 typedef const char* (*GetNameFn)(void*, VPANEL);
 typedef void   (*GetSizeFn)(void*, VPANEL, int&, int&);
+typedef void   (*GetTextPosFn)(void*, int&, int&);
 
 const int FONTFLAG_ANTIALIAS = 0x010;
 const int FONTFLAG_OUTLINE = 0x200;
@@ -217,12 +218,15 @@ void DrawKeys(VPANEL overlay)
 	}
 	VFunc<SetTextFontFn>(g_surface, VT_Surface_DrawSetTextFont)(g_surface, g_keysFont);
 
-	// shavit's lines are padded to line up, so they start at the same x. A coordinate left at -1 centres on
-	// it, with fullwidth characters taken as a full em and the rest as half.
+	// shavit's lines are padded to line up, so they start at the same x. A coordinate left at -1 centres the
+	// widest line, measured by printing it unseen and reading how far the text pos moved.
 	int widest = 0;
 	for (const std::wstring& line : g_keys.lines) {
-		int width = 0;
-		for (wchar_t c : line) width += c >= 0x2000 ? tall : tall / 2;
+		VFunc<Int4Fn>(g_surface, VT_Surface_DrawSetTextColor)(g_surface, 0, 0, 0, 0);
+		VFunc<Int2Fn>(g_surface, VT_Surface_DrawSetTextPos)(g_surface, 0, 0);
+		VFunc<PrintTextFn>(g_surface, VT_Surface_DrawPrintText)(g_surface, line.c_str(), (int)line.size(), 0);
+		int width = 0, y = 0;
+		VFunc<GetTextPosFn>(g_surface, VT_Surface_DrawGetTextPos)(g_surface, width, y);
 		if (width > widest) widest = width;
 	}
 	const int count = (int)g_keys.lines.size();
