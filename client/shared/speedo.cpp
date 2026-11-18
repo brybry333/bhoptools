@@ -326,12 +326,13 @@ void Cmd_HudKeys(const CCommandX& c) { SettingCmd(c, &Settings::hudkeys, "hud_ke
 void Cmd_Viewpunch(const CCommandX& c) { SettingCmd(c, &Settings::viewpunch, "bhoptools_viewpunch"); }
 void Cmd_Cstv(const CCommandX& c) { SettingCmd(c, &Settings::cstv, "bhoptools_cstv"); }
 void Cmd_Paint(const CCommandX& c) { SettingCmd(c, &Settings::paint, "bhoptools_paint"); }
+void Cmd_Triggerlook(const CCommandX& c) { SettingCmd(c, &Settings::triggerlook, "bhoptools_triggerlook"); }
 void Cmd_PredictToggle(const CCommandX&) { HotkeyAction(4); }
 #ifdef _WIN32
 void Cmd_ApeToggle(const CCommandX&) { HotkeyAction(1); }
 #endif
 
-ConCommandX g_cmds[7];
+ConCommandX g_cmds[8];
 
 }  // namespace
 
@@ -352,6 +353,7 @@ void RegisterCommands()
 		{ "hud_keys", "Keys in shavit's key overlay from the newest local command (0/1).", Cmd_HudKeys },
 		{ "bhoptools_viewpunch", "Remove viewpunch, e.g. from fall damage (0/1, on by default).", Cmd_Viewpunch },
 		{ "bhoptools_cstv", "CS:TV (video screens) on or off (0/1, on by default), as in Options > bhoptools.", Cmd_Cstv },
+		{ "bhoptools_triggerlook", "the trigger menu (triggerlook) on or off (0/1, on by default), as in Options > bhoptools. Off = the game's own trigger look.", Cmd_Triggerlook },
 		{ "bhoptools_paint", "paint (p2paint) on or off (0/1, on by default), as in Options > bhoptools. Off = the server's classic paint from the next join.", Cmd_Paint },
 		{ "bhoptools_predict_toggle", "Turn client-side prediction on or off, for a key (F8 by default; bhoptools_predict 0/1 sets it).", Cmd_PredictToggle },
 #ifdef _WIN32

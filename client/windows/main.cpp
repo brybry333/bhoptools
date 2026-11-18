@@ -80,6 +80,7 @@ void (*g_cstvEnable)(bool);
 // triggerlook (the trigger menu, triggerlook_menu) the same way: triggerlook.dll next to bhoptools.exe. Loading it is
 // all it needs: it starts itself on the game's main thread (and stays off if another copy already runs).
 wchar_t g_triggerlookDll[MAX_PATH];
+void (*g_triggerlookEnable)(bool);
 // paint (p2paint) the same way: p2paint.dll next to bhoptools.exe (maretf.exe beside it turns pictures into paint).
 // It starts itself like triggerlook; p2paint_enable is the Options switch, p2paint_server greys its row out.
 wchar_t g_p2paintDll[MAX_PATH];
@@ -805,8 +806,15 @@ DWORD InjectionEntryPoint(DWORD processID)
 		else
 			CoreLog("CS:TV: couldn't load cstv_client.dll (error %lu)", GetLastError());
 	}
-	if (g_triggerlookDll[0] && !LoadLibraryW(g_triggerlookDll))
-		CoreLog("triggerlook: couldn't load triggerlook.dll (error %lu)", GetLastError());
+	if (g_triggerlookDll[0])
+	{
+		const HMODULE h = LoadLibraryW(g_triggerlookDll);
+		g_triggerlookEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "triggerlook_enable_set")) : nullptr;
+		if (g_triggerlookEnable)
+			g_triggerlookEnable(settings::Get().triggerlook);
+		else
+			CoreLog("triggerlook: couldn't load triggerlook.dll (error %lu)", GetLastError());
+	}
 	if (g_p2paintDll[0])
 	{
 		const HMODULE h = LoadLibraryW(g_p2paintDll);
@@ -830,6 +838,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 			g_curtimefixEnable(s.curtimefix);
 		if (g_cstvEnable)
 			g_cstvEnable(s.cstv);
+		if (g_triggerlookEnable)
+			g_triggerlookEnable(s.triggerlook);
 		if (g_p2paintEnable)
 			g_p2paintEnable(s.paint);
 	});

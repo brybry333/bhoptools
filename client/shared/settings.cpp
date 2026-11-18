@@ -39,6 +39,7 @@ const Field kFields[] = {
 	{ "rawprecise", &Settings::rawprecise },
 	{ "curtimefix", &Settings::curtimefix },
 	{ "cstv",      &Settings::cstv },
+	{ "triggerlook", &Settings::triggerlook },
 	{ "paint",     &Settings::paint },
 	{ "f8bound",   &Settings::f8bound },
 };

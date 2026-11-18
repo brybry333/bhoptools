@@ -70,6 +70,7 @@ const Row kRows[] = {
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
 	{ &Settings::curtimefix, nullptr,          L"curtimefix (smooth movement on old maps)" },
 	{ &Settings::cstv,      nullptr,            L"CS:TV (video screens)" },
+	{ &Settings::triggerlook, nullptr,          L"trigger menu (triggerlook)" },
 	{ &Settings::paint,     nullptr,            L"paint", PaintGreyed, L"  (no paint plugin on this server)" },
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);

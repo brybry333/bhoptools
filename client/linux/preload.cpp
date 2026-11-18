@@ -588,10 +588,17 @@ static void FindCstv()
 
 // triggerlook (the trigger menu, triggerlook_menu) is its own library: triggerlook.so next to bhoptools.so. It needs
 // TriggerLook_Init on the main thread (here). Already loaded by its own preload (libtriggerlook.so): left alone.
+typedef void (*TriggerlookEnable_t)(bool);
+static TriggerlookEnable_t g_triggerlookEnable;
 static void LoadTriggerlook()
 {
 	Dl_info info;
-	if (dlsym(RTLD_DEFAULT, "TriggerLook_Init") || !dladdr((void*)&LoadTriggerlook, &info) || !info.dli_fname) return;
+	if (dlsym(RTLD_DEFAULT, "TriggerLook_Init")) {	// its own preload's copy: drive that one
+		g_triggerlookEnable = (TriggerlookEnable_t)dlsym(RTLD_DEFAULT, "triggerlook_enable_set");
+		if (g_triggerlookEnable) g_triggerlookEnable(settings::Get().triggerlook);
+		return;
+	}
+	if (!dladdr((void*)&LoadTriggerlook, &info) || !info.dli_fname) return;
 	std::string path = info.dli_fname;
 	path.erase(path.rfind('/') + 1);
 	path += "triggerlook.so";
@@ -599,6 +606,8 @@ static void LoadTriggerlook()
 	int (*init)() = h ? (int (*)())dlsym(h, "TriggerLook_Init") : nullptr;
 	if (init) init();
 	else CoreLog("triggerlook: not loaded (%s missing or unloadable)", path.c_str());
+	g_triggerlookEnable = h ? (TriggerlookEnable_t)dlsym(h, "triggerlook_enable_set") : nullptr;
+	if (g_triggerlookEnable) g_triggerlookEnable(settings::Get().triggerlook);
 }
 
 // paint (p2paint) is its own library too: p2paint.so next to bhoptools.so. P2Paint_Start on the main thread (here)
@@ -665,6 +674,7 @@ static void InstallCodeHooks()
 		}
 		if (g_curtimefixEnable) g_curtimefixEnable(s.curtimefix);
 		if (g_cstvEnable) g_cstvEnable(s.cstv);
+		if (g_triggerlookEnable) g_triggerlookEnable(s.triggerlook);
 		if (g_p2paintEnable) g_p2paintEnable(s.paint);
 	});
 	core::SyncPredict();

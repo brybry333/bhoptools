@@ -100,6 +100,7 @@ R"KB("bhoptools_ape_toggle"	"Toggle BunnyhopAPE autobhop prediction"
 #endif
 R"KB("cstv"		"Open / close CS:TV"
 "cstv_book"	"Open / close the Progress Log"
+"triggerlook_menu"	"Open the trigger menu"
 "p2paint_menu"	"Open the paint menu"
 "+paint"	"Paint (hold, then click)"
 "+erase"	"Erase paint (hold, then click)"

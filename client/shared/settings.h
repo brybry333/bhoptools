@@ -18,6 +18,7 @@ struct Settings {
 	bool rawprecise = false; // Windows only: mouse reports timestamped on their own thread, each tick takes its own
 	bool curtimefix = true; // curtimefix on/off, if libcurtimefix.so / curtimefix.dll sits next to bhoptools
 	bool cstv      = true;   // CS:TV (video screens) on/off, if CS:TV is installed with bhoptools
+	bool triggerlook = true; // the trigger menu (triggerlook) on/off, if triggerlook.so / triggerlook.dll sits next to bhoptools
 	bool paint     = true;   // paint (p2paint) on/off, if p2paint.so / p2paint.dll sits next to bhoptools
 	bool f8bound   = false;  // F8 got its default bind (bhoptools_predict_toggle) once: a key the player clears stays clear
 };
