@@ -12,7 +12,10 @@ trigger menu. Based on [ddyfad/bhoptools](https://github.com/ddyfad/bhoptools) 1
 
 **Linux**
 1. Download `bhoptools-linux.tar.gz` from [Releases](../../releases), unpack it and run `./install.sh`.
-2. Paste the line it prints into CS:S → Properties → Launch Options.
+2. CS:S → Properties → Launch Options:
+   ```
+   LD_PRELOAD="$HOME/.local/share/bhoptools/bhoptools.so:$HOME/.local/share/bhoptools/cstv/client/libcstv.so:$LD_PRELOAD" %command% -insecure
+   ```
 
 Keys: CS:S Options → Keyboard, the bhoptools section at the top (only F8 = prediction has a default).
 On/off switches: Options → bhoptools.
