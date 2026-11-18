@@ -27,7 +27,8 @@ On/off switches: Options → bhoptools.
   - [curtimefix](https://github.com/brybry333/curtimefix): smooth movement on old maps
   - [CS:TV](https://github.com/brybry333/cstv): video screens (source in `cstv/`)
   - [triggerlook](https://github.com/brybry333/triggerlook): the triggers a server shows, in your own look (`triggerlook_menu`)
-  - [p2paint](https://github.com/brybry333/p2paint): paint on servers with its plugin (`p2paint_menu`)
+  - [p2paint](https://github.com/brybry333/p2paint): paint (`p2paint_menu`) on servers running its SourceMod plugin,
+    [paint_3.sp](https://github.com/brybry333/p2paint/blob/main/plugin/paint_3.sp) (server owners: see p2paint's README)
 - keys in the game's own Options → Keyboard instead of fixed F-keys
 
 ## Build
