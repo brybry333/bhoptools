@@ -16,6 +16,7 @@ namespace core {
 inline const char* OnLevelInit(const char* mapname, bool cpReady, bool tpReady)
 {
 	settings::ApplyRawInput(true);
+	settings::DefaultBinds();
 	if (cpReady) cp::OnLevelInit();
 	// A same-map reconnect keeps the level name, so the sim can't see it itself.
 	if (tpReady) tp::OnLevelInit();
@@ -29,7 +30,7 @@ inline void SyncPredict()
 	if (tp::Enabled() != on) tp::SetEnabled(on);
 }
 
-// F8. Returns the new state for the on-screen message.
+// bhoptools_predict_toggle (F8 by default). Returns the new state for the on-screen message.
 inline bool TogglePredict()
 {
 	Settings& s = settings::Get();

@@ -9,6 +9,8 @@ static const int VT_IGameMovement_CheckJumpButton = 29;
 // engine.dll CreateInterface("VEngineClient014"), checked by disassembly.
 static const int VT_IVEngineClient_ServerCmd        = 6;
 static const int VT_IVEngineClient_ClientCmdUnrestricted = 106;
+static const int VT_IVEngineClient_KeyLookupBinding = 22;   // IVEngineClient013, no virtual destructor
+static const int VT_IVEngineClient_KeyBindingForKey = 23;
 static const int VT_IEngineSound_EmitAmbientSound = 11; // IEngineSoundClient003: (sample, volume, pitch, flags, soundtime)
 static const int VT_IVEngineClient_GetViewAngles    = 19;
 static const int VT_IVEngineClient_SetViewAngles    = 20;

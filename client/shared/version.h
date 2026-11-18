@@ -1,2 +1,2 @@
-// The release workflow overwrites this with the tag. "dev" skips the update check.
-#define APP_VERSION "dev"
+// The fork's own version, only shown in logs and the Windows console (nothing checks it).
+#define APP_VERSION "1.14.1-fork.1"

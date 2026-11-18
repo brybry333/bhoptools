@@ -21,6 +21,11 @@
 #include <cstring>
 #include <string>
 
+#if defined(__linux__)
+// glibc 2.43 added a new atan2f version; the old one keeps the .so loadable on glibc 2.31 (make check-glibc)
+__asm__(".symver atan2f,atan2f@GLIBC_2.2.5");
+#endif
+
 namespace js {
 namespace {
 

@@ -37,6 +37,10 @@ const Field kFields[] = {
 	{ "chatglyphs", &Settings::chatglyphs },
 	{ "pollfix",   &Settings::pollfix },
 	{ "rawprecise", &Settings::rawprecise },
+	{ "curtimefix", &Settings::curtimefix },
+	{ "cstv",      &Settings::cstv },
+	{ "paint",     &Settings::paint },
+	{ "f8bound",   &Settings::f8bound },
 };
 
 }
@@ -56,12 +60,6 @@ std::string Dir()
 #endif
 }
 
-// The launcher reads no_update_check before the game starts, so this setting lives in that file, not settings.cfg.
-std::string NoUpdateCheckFile()
-{
-	const std::string dir = Dir();
-	return dir.empty() ? dir : dir + "/no_update_check";
-}
 
 namespace {
 
@@ -74,26 +72,7 @@ void MakeDir(const std::string& dir)
 #endif
 }
 
-void LoadUpdates()
-{
-	const std::string file = NoUpdateCheckFile();
-	FILE* f = file.empty() ? nullptr : fopen(file.c_str(), "r");
-	g_settings.updates = f == nullptr;
-	if (f) fclose(f);
-}
 
-void SaveUpdates()
-{
-	const std::string file = NoUpdateCheckFile();
-	if (file.empty()) return;
-	if (g_settings.updates) {
-		remove(file.c_str());
-		return;
-	}
-	MakeDir(Dir());
-	FILE* f = fopen(file.c_str(), "w");
-	if (f) fclose(f);
-}
 
 std::string Path()
 {
@@ -127,17 +106,11 @@ void Save()
 
 Settings& Get() { return g_settings; }
 
-void StopUpdateChecks()
-{
-	g_settings.updates = false;
-	SaveUpdates();
-}
 
 void Load()
 {
 	const std::string path = Path();
 	FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "r");
-	LoadUpdates();
 	if (f) {
 		char line[128];
 		while (fgets(line, sizeof(line), f)) {
@@ -166,7 +139,6 @@ void Changed()
 	if (g_apply) g_apply();
 	ApplyRawInput(false);
 	Save();
-	SaveUpdates();
 }
 
 void ApplyRawInput(bool levelLoad)
@@ -186,6 +158,28 @@ void ApplyRawInput(bool levelLoad)
 	void* fn = (*reinterpret_cast<void***>(engine))[VT_IVEngineClient_ClientCmdUnrestricted];
 	if (!InModuleCode(ENGINE_MODULE, fn)) return;
 	reinterpret_cast<void (*)(void*, const char*)>(fn)(engine, g_settings.rawinput ? "m_rawinput 1\n" : "m_rawinput 0\n");
+}
+
+void DefaultBinds()
+{
+	if (g_settings.f8bound) return;
+	void* engine = CreateInterfaceIn(ENGINE_MODULE, "VEngineClient014");
+	void** vt = engine ? *reinterpret_cast<void***>(engine) : nullptr;
+	if (!vt || !InModuleCode(ENGINE_MODULE, vt[VT_IVEngineClient_KeyLookupBinding])
+			|| !InModuleCode(ENGINE_MODULE, vt[VT_IVEngineClient_KeyBindingForKey])
+			|| !InModuleCode(ENGINE_MODULE, vt[VT_IVEngineClient_ClientCmdUnrestricted])) {
+		CoreLog("keys: the engine's key functions aren't where expected, F8 left alone");
+		return;
+	}
+	g_settings.f8bound = true;
+	Save();
+	const int kKeyF8 = 99;  // ButtonCode_t KEY_F8
+	const char* onF8 = reinterpret_cast<const char* (*)(void*, int)>(vt[VT_IVEngineClient_KeyBindingForKey])(engine, kKeyF8);
+	const char* key = reinterpret_cast<const char* (*)(void*, const char*)>(vt[VT_IVEngineClient_KeyLookupBinding])(engine, "bhoptools_predict_toggle");
+	if (onF8 && *onF8) { CoreLog("keys: F8 is \"%s\", so the prediction toggle gets no default key", onF8); return; }
+	if (key && *key) { CoreLog("keys: the prediction toggle is on %s already", key); return; }
+	reinterpret_cast<void (*)(void*, const char*)>(vt[VT_IVEngineClient_ClientCmdUnrestricted])(engine, "bind F8 bhoptools_predict_toggle\n");
+	CoreLog("keys: F8 -> bhoptools_predict_toggle (once; change it in Options > Keyboard)");
 }
 
 void SetApply(std::function<void()> fn) { g_apply = fn; }

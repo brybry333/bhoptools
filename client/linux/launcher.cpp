@@ -87,7 +87,7 @@ int main()
 	printf("bhoptools -- Linux\n");
 	printf("=========================\n\n");
 	printf("m_rawinput 2 style mouse interpolation (Options > Fixes, sets m_rawinput)\n");
-	printf("F8 toggles all client-side prediction (on by default)\n");
+	printf("F8 toggles all client-side prediction (on by default; keys in Options > Keyboard > bhoptools)\n");
 	printf("checkpoints and noclip predicted on servers running the bhoptools plugin\n");
 	printf("download progress shown in the loading bar\n");
 	printf("missing / differing maps fetched from fastdl.me\n\n");
@@ -111,10 +111,23 @@ int main()
 		printf("Move the .so to a path without them (e.g. ~/.local/lib/) and use that.\n\n");
 	}
 
+	// CS:TV comes in through its own script: its helper has to run outside Steam's runtime, and the script adds
+	// its client to LD_PRELOAD
+	char cstv[PATH_MAX];
+	snprintf(cstv, sizeof(cstv), "%s/cstv/cstv-launch", dir);
+	const bool have_cstv = path_exists(cstv);
+
 	printf("In Steam, right-click Counter-Strike: Source -> Properties -> Launch Options,\n");
 	printf("and paste the following (all one line):\n\n");
 	// Appending $LD_PRELOAD keeps the Steam overlay, which Steam preloads the same way.
-	printf("    LD_PRELOAD=\"%s:$LD_PRELOAD\" %%command%% -insecure\n\n", so_path);
+	if (have_cstv)
+		printf("    LD_PRELOAD=\"%s:$LD_PRELOAD\" \"%s\" %%command%% -insecure\n\n", so_path, cstv);
+	else
+		printf("    LD_PRELOAD=\"%s:$LD_PRELOAD\" %%command%% -insecure\n\n", so_path);
+	if (have_cstv) {
+		printf("CS:TV (video screens) needs these installed: mpv (libmpv), yt-dlp, streamlink, and Python 3 with\n");
+		printf("Pillow. Turn it on/off in Options > bhoptools; its keys are in Options > Keyboard (none by default).\n\n");
+	}
 
 	printf("VAC WARNING:\n");
 	printf("  The preload does nothing unless the game runs with -insecure, so keep\n");

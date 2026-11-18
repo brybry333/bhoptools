@@ -324,8 +324,14 @@ void SettingCmd(const CCommandX& c, bool Settings::* value, const char* name)
 void Cmd_HudSpeed(const CCommandX& c) { SettingCmd(c, &Settings::speedo, "hud_speed"); }
 void Cmd_HudKeys(const CCommandX& c) { SettingCmd(c, &Settings::hudkeys, "hud_keys"); }
 void Cmd_Viewpunch(const CCommandX& c) { SettingCmd(c, &Settings::viewpunch, "bhoptools_viewpunch"); }
+void Cmd_Cstv(const CCommandX& c) { SettingCmd(c, &Settings::cstv, "bhoptools_cstv"); }
+void Cmd_Paint(const CCommandX& c) { SettingCmd(c, &Settings::paint, "bhoptools_paint"); }
+void Cmd_PredictToggle(const CCommandX&) { HotkeyAction(4); }
+#ifdef _WIN32
+void Cmd_ApeToggle(const CCommandX&) { HotkeyAction(1); }
+#endif
 
-ConCommandX g_cmds[3];
+ConCommandX g_cmds[7];
 
 }  // namespace
 
@@ -338,15 +344,22 @@ void RegisterCommands()
 	void* echo = cvar ? VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "echo") : nullptr;
 	const char* echoName = echo ? static_cast<ConCommandX*>(echo)->name : nullptr;
 	if (!echo || !VFunc<bool (*)(void*)>(echo, VT_CCB_IsCommand)(echo) || !echoName || strcmp(echoName, "echo")) {
-		CoreLog("speedo: couldn't register hud_speed, hud_keys and bhoptools_viewpunch");
+		CoreLog("speedo: couldn't register hud_speed, hud_keys, bhoptools_viewpunch and the toggles");
 		return;
 	}
-	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[3] = {
+	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
 		{ "hud_speed", "Speed in shavit's HUD from local prediction (0/1).", Cmd_HudSpeed },
 		{ "hud_keys", "Keys in shavit's key overlay from the newest local command (0/1).", Cmd_HudKeys },
 		{ "bhoptools_viewpunch", "Remove viewpunch, e.g. from fall damage (0/1, on by default).", Cmd_Viewpunch },
+		{ "bhoptools_cstv", "CS:TV (video screens) on or off (0/1, on by default), as in Options > bhoptools.", Cmd_Cstv },
+		{ "bhoptools_paint", "paint (p2paint) on or off (0/1, on by default), as in Options > bhoptools. Off = the server's classic paint from the next join.", Cmd_Paint },
+		{ "bhoptools_predict_toggle", "Turn client-side prediction on or off, for a key (F8 by default; bhoptools_predict 0/1 sets it).", Cmd_PredictToggle },
+#ifdef _WIN32
+		{ "bhoptools_ape_toggle", "Turn BunnyhopAPE autobhop prediction on or off, for a key (off at start, no default key).", Cmd_ApeToggle },
+#endif
 	};
-	for (int i = 0; i < 3; ++i) {
+	static_assert(sizeof(defs) / sizeof(defs[0]) <= sizeof(g_cmds) / sizeof(g_cmds[0]), "g_cmds");
+	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];
 		c.vtable = *reinterpret_cast<void**>(echo);
 		c.name = defs[i].name;

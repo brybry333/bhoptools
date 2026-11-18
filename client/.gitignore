@@ -4,3 +4,4 @@ Release
 linux/bhoptools.so
 linux/bhoptools
 *.vcxproj.user
+windows/build/

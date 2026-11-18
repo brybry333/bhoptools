@@ -99,9 +99,6 @@ const int kRestoreAll      = kRestoreAngles | kRestoreVelocity;
 const int kProto = 2;
 const int kOldFrameWindow = 4;   // must match the server plugin
 const double kHelloInterval = 2.0;
-// After a few unanswered hellos the server likely has no plugin; keep asking, but quietly.
-const double kHelloSlowInterval = 30.0;
-const int    kHelloFastTries = 5;
 const double kMenuWindow = 1.0;
 const int kMaxSlots = 32;
 
@@ -1570,8 +1567,10 @@ void MaybeHello()
 	}
 	if (g_caps && HelloFlags() != g_helloSent) g_helloWanted = true;
 	if (!g_helloWanted && g_caps) return;
-	const double interval = g_caps || g_helloTries < kHelloFastTries ? kHelloInterval : kHelloSlowInterval;
-	if (now - g_lastHello < interval) return;
+	// fork: one hello per session (new map, bhoptools_ask, or a flag change once caps are in), not retried:
+	// a server without the plugin answers every hello with a console line
+	if (!g_caps && g_helloTries >= 1) return;
+	if (now - g_lastHello < kHelloInterval) return;
 	g_lastHello = now;
 	g_helloTries++;
 	g_helloWanted = false;
@@ -1579,10 +1578,9 @@ void MaybeHello()
 	if (!(g_helloSent & kClientJumpstats)) js::Reset(g_session);
 	char cmd[64];
 	snprintf(cmd, sizeof(cmd), "bhoptools_hello %d %d %d", g_session, kProto, g_helloSent);
-	// Until caps arrive it's retried, and only one reliable message is in flight at a time: reliable, it
-	// would hold up the next checkpoint or noclip command sent as text for a round trip. After that it
-	// only carries a flag change, which goes once, so it has to be reliable.
-	VFunc<void (*)(void*, const char*, bool)>(g_engine, VT_IVEngineClient_ServerCmd)(g_engine, cmd, g_caps != 0);
+	// Reliable, since it goes once. Only one reliable message is in flight at a time, so a checkpoint or
+	// noclip command sent as text right after joining waits one round trip.
+	VFunc<void (*)(void*, const char*, bool)>(g_engine, VT_IVEngineClient_ServerCmd)(g_engine, cmd, true);
 }
 
 // Same rule as the server: shift while adding d lands a command closer to the previous one.

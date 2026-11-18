@@ -1,0 +1,1 @@
+{ global: SDL_OpenAudioDevice; cstv_enable; local: *; };

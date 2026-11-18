@@ -1,0 +1,7 @@
+third_party/source-sdk-2013
+win/deps
+win/build/
+helper/cstvd
+*.o
+*.so
+__pycache__/

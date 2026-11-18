@@ -16,7 +16,10 @@ struct Settings {
 	bool chatglyphs = true;  // Linux only
 	bool pollfix   = true;   // Windows only: no legacy mouse messages in game, the message pump filtered in menus
 	bool rawprecise = false; // Windows only: mouse reports timestamped on their own thread, each tick takes its own
-	bool updates   = true;   // ask about updates when starting; "Don't ask again" in the launcher turns it off (no_update_check)
+	bool curtimefix = true; // curtimefix on/off, if libcurtimefix.so / curtimefix.dll sits next to bhoptools
+	bool cstv      = true;   // CS:TV (video screens) on/off, if CS:TV is installed with bhoptools
+	bool paint     = true;   // paint (p2paint) on/off, if p2paint.so / p2paint.dll sits next to bhoptools
+	bool f8bound   = false;  // F8 got its default bind (bhoptools_predict_toggle) once: a key the player clears stays clear
 };
 
 namespace settings {
@@ -28,16 +31,14 @@ void Changed();
 void SetApply(std::function<void()> fn);
 // The folder settings.cfg lives in, empty if there's none.
 std::string Dir();
-// While this file exists nobody is asked about updates: the launchers check it before the game
-// starts, and the Options tab's updates setting is this file. Empty if there's no settings folder.
-std::string NoUpdateCheckFile();
-// "Don't ask again" (Cancel on Windows, "Ignore forever" on Linux): creates that file. Usable
-// before Load(), from the launcher.
-void StopUpdateChecks();
 
 // Mouse interpolation decides m_rawinput: on makes it 1 if it's 0, off makes it 0. Called on
 // each level load, after config.cfg has set it, and on every change. With nothing saved yet the
 // setting takes m_rawinput's value at the first level load.
 void ApplyRawInput(bool levelLoad);
+
+// Once per install, at a level load (config.cfg is in by then): F8 -> bhoptools_predict_toggle, unless F8 has a bind of the
+// player's or prediction is on another key already. Everything else in Options > Keyboard > bhoptools has no default.
+void DefaultBinds();
 
 }

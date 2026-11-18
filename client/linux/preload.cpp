@@ -26,15 +26,11 @@
 #include "download_progress.h"
 #include "fastdl.h"
 #include "settings.h"
-#include "version.h"
-#include "update_json.h"
-#include "file_util.h"
-#include "release_sig.h"
-#include "self_update.h"
 #include "options_tab.h"
 #include "spectate.h"
 #include "client_core.h"
 #include "singleletter_fix.h"
+#include "keylists.h"
 
 static bool InstallHook(uintptr_t target, uintptr_t hook, size_t copy_size, void** original);
 
@@ -108,10 +104,8 @@ void CoreLog(const char* fmt, ...)
 	va_end(ap);
 }
 
-#define SDL_KEYDOWN      0x300
 #define SDL_MOUSEMOTION  0x400
 #define SDL_TOUCH_MOUSEID 0xFFFFFFFFu
-#define SDL_SCANCODE_F8  65
 
 struct SDL_KeyboardEvent {
 	uint32_t type;
@@ -555,6 +549,88 @@ static void RemoveFrametimeFloor()
 	mprotect_range((uintptr_t)site, sizeof(kFrametimeFloorNop), PROT_READ | PROT_EXEC);
 }
 
+// curtimefix is its own library: libcurtimefix.so next to bhoptools.so, switched by the Options tab.
+typedef void (*CurtimefixEnable_t)(bool);
+static CurtimefixEnable_t g_curtimefixEnable;
+
+static void LoadCurtimefix()
+{
+	// A copy already preloaded on its own: drive that one (a second copy would stay idle)
+	g_curtimefixEnable = (CurtimefixEnable_t)dlsym(RTLD_DEFAULT, "curtimefix_enable");
+	Dl_info info;
+	if (!g_curtimefixEnable && dladdr((void*)&LoadCurtimefix, &info) && info.dli_fname) {
+		std::string path = info.dli_fname;
+		path.erase(path.rfind('/') + 1);
+		path += "libcurtimefix.so";
+		void* h = dlopen(path.c_str(), RTLD_NOW);
+		if (!h) {
+			CoreLog("curtimefix: not loaded (%s missing or unloadable)", path.c_str());
+			return;
+		}
+		g_curtimefixEnable = (CurtimefixEnable_t)dlsym(h, "curtimefix_enable");
+	}
+	if (!g_curtimefixEnable) {
+		CoreLog("curtimefix: too old for the Options tab (needs 1.3)");
+		return;
+	}
+	g_curtimefixEnable(settings::Get().curtimefix);
+}
+
+// CS:TV is preloaded by its own cstv-launch (its helper has to run outside Steam's runtime): drive that copy.
+typedef void (*CstvEnable_t)(bool);
+static CstvEnable_t g_cstvEnable;
+static void FindCstv()
+{
+	g_cstvEnable = (CstvEnable_t)dlsym(RTLD_DEFAULT, "cstv_enable");
+	if (g_cstvEnable) g_cstvEnable(settings::Get().cstv);
+	else CoreLog("CS:TV: not loaded (it comes in through cstv/cstv-launch in the launch options)");
+}
+
+// triggerlook (the trigger menu, triggerlook_menu) is its own library: triggerlook.so next to bhoptools.so. It needs
+// TriggerLook_Init on the main thread (here). Already loaded by its own preload (libtriggerlook.so): left alone.
+static void LoadTriggerlook()
+{
+	Dl_info info;
+	if (dlsym(RTLD_DEFAULT, "TriggerLook_Init") || !dladdr((void*)&LoadTriggerlook, &info) || !info.dli_fname) return;
+	std::string path = info.dli_fname;
+	path.erase(path.rfind('/') + 1);
+	path += "triggerlook.so";
+	void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+	int (*init)() = h ? (int (*)())dlsym(h, "TriggerLook_Init") : nullptr;
+	if (init) init();
+	else CoreLog("triggerlook: not loaded (%s missing or unloadable)", path.c_str());
+}
+
+// paint (p2paint) is its own library too: p2paint.so next to bhoptools.so. P2Paint_Start on the main thread (here)
+// starts it: console commands, the engine patches (before the first map), its game files. It returns 0 when another
+// copy already runs (its own libp2paint.so preload): that copy is left alone, and the Options switch can't reach it.
+typedef void (*P2paintEnable_t)(bool);
+static P2paintEnable_t g_p2paintEnable;
+static int (*g_p2paintServer)();
+int PaintServerState() { return g_p2paintServer ? g_p2paintServer() : -1; }
+static void LoadP2paint()
+{
+	Dl_info info;
+	if (!dladdr((void*)&LoadP2paint, &info) || !info.dli_fname) return;
+	std::string path = info.dli_fname;
+	path.erase(path.rfind('/') + 1);
+	path += "p2paint.so";
+	void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+	int (*start)() = h ? (int (*)())dlsym(h, "P2Paint_Start") : nullptr;
+	if (!start) {
+		CoreLog("paint: not loaded (%s missing or unloadable)", path.c_str());
+		return;
+	}
+	g_p2paintEnable = (P2paintEnable_t)dlsym(h, "p2paint_enable");
+	if (g_p2paintEnable) g_p2paintEnable(settings::Get().paint);
+	if (!start()) {
+		CoreLog("paint: another copy already runs (libp2paint.so in the launch options?): the Options switch can't reach it");
+		g_p2paintEnable = nullptr;
+		return;
+	}
+	g_p2paintServer = (int (*)())dlsym(h, "p2paint_server");
+}
+
 // The main thread is never inside a patched function while it pumps SDL events.
 static void InstallCodeHooks()
 {
@@ -587,11 +663,23 @@ static void InstallCodeHooks()
 			g_viewpunchRemoved = s.viewpunch;
 			ApplyViewpunch();
 		}
+		if (g_curtimefixEnable) g_curtimefixEnable(s.curtimefix);
+		if (g_cstvEnable) g_cstvEnable(s.cstv);
+		if (g_p2paintEnable) g_p2paintEnable(s.paint);
 	});
 	core::SyncPredict();
+	LoadCurtimefix();
+	FindCstv();
+	LoadTriggerlook();
+	LoadP2paint();
 }
 
 static pthread_t g_mainThread;
+
+void speedo::HotkeyAction(int key)
+{
+	if (key == 4) hudmsg("prediction %d", core::TogglePredict() ? 1 : 0);
+}
 
 // SDL_PushEvent also calls watches on the pushing thread; only the main thread may patch.
 static int Bhoptools_SDLWatch(void* /*userdata*/, SDL_Event* ev)
@@ -602,11 +690,6 @@ static int Bhoptools_SDLWatch(void* /*userdata*/, SDL_Event* ev)
 	if (__atomic_load_n(&g_punchPending, __ATOMIC_RELAXED)
 			&& __atomic_exchange_n(&g_punchPending, false, __ATOMIC_ACQ_REL)) ApplyViewpunch();
 	if (g_originalGetAccumulatedMouseDeltas) core::PollLateInstalls(plat_now());
-	if (ev->type == SDL_KEYDOWN) {
-		if (ev->key.repeat) return 1;
-		if (ev->key.scancode == SDL_SCANCODE_F8) hudmsg("prediction %d", core::TogglePredict() ? 1 : 0);
-		return 1;
-	}
 	if (ev->type != SDL_MOUSEMOTION || ev->motion.which == SDL_TOUCH_MOUSEID || !RelativeMouseMode()) return 1;
 
 	const double now = plat_now();
@@ -930,7 +1013,6 @@ static void InstallTriggerPredictionNetvars()
 	}
 }
 
-static void* UpdateThread(void*);
 
 static void* InstallerThread(void* /*arg*/)
 {
@@ -966,163 +1048,9 @@ static void* InstallerThread(void* /*arg*/)
 	if (g_SDLPollEvent && g_SDLPeepEvents && !HookPltImport("launcher.so", "SDL_PollEvent", (void*)&Hooked_SDLPollEvent))
 		CoreLog("8k mouse merge: launcher.so SDL_PollEvent import not found");
 
-	StartDetached(UpdateThread, nullptr);
-
 	InstallViewpunchRemover();
 	InstallTriggerPredictionNetvars();
 	return nullptr;
-}
-
-struct SDL_MessageBoxButtonData { uint32_t flags; int buttonid; const char* text; };
-struct SDL_MessageBoxData {
-	uint32_t flags;
-	void* window;
-	const char* title;
-	const char* message;
-	int numbuttons;
-	const SDL_MessageBoxButtonData* buttons;
-	const void* colorScheme;
-};
-typedef int (*SDL_ShowMessageBox_t)(const SDL_MessageBoxData*, int*);
-
-static int ShowSDLMessageBox(const char* message, const SDL_MessageBoxButtonData* buttons, int count)
-{
-	// SDL wants at least one button.
-	static const SDL_MessageBoxButtonData ok = { 1, 0, "OK" };
-	if (!count) { buttons = &ok; count = 1; }
-	void* h = ModuleHandle("libSDL2");
-	if (!h) return -1;
-	auto show = (SDL_ShowMessageBox_t)dlsym(h, "SDL_ShowMessageBox");
-	auto focus = (void* (*)())dlsym(h, "SDL_GetKeyboardFocus");
-	dlclose(h);
-	if (!show) return -1;
-	// Parented to the game window so a fullscreen game doesn't cover it, which also means
-	// waiting until that window is up.
-	void* window = nullptr;
-	for (int i = 0; focus && i < 600 && !(window = focus()); i++) usleep(100000);
-	SDL_MessageBoxData data = { 0x40, window, "bhoptools update", message, count, buttons, nullptr };
-	int id = -1;
-	return show(&data, &id) == 0 ? id : -1;
-}
-
-
-// Downloads an ELF file and checks it's the one with sha256 `hash`; removed if it isn't.
-static bool DownloadElf(const char* url, const char* path, const std::string& hash, char* err)
-{
-	if (!CurlDownload(url, path, err)) return false;
-	const std::string data = ReadAll(path);
-	if (data.size() < 4 || memcmp(data.data(), "\x7f" "ELF", 4) != 0)
-		snprintf(err, 256, "the download isn't an ELF file");
-	else if (relsig::Sha256Hex(data) != hash)
-		snprintf(err, 256, "the download isn't the file its signed SHA256SUMS lists");
-	else
-		return true;
-	unlink(path);
-	return false;
-}
-
-// Exit 42 makes cstrike.sh start the game again; _restart reloads the engine in-process and crashes.
-static void* UpdateThread(void*)
-{
-	if (!strcmp(APP_VERSION, "dev")) return nullptr;
-	const char* home = getenv("HOME");
-	if (!home) return nullptr;
-	char cache[PATH_MAX];
-	const std::string ignoreFile = settings::NoUpdateCheckFile();
-	const bool ignored = !ignoreFile.empty() && access(ignoreFile.c_str(), F_OK) == 0;
-
-	snprintf(cache, sizeof(cache), "%s/.cache", home);
-	mkdir(cache, 0755);
-	snprintf(cache, sizeof(cache), "%s/.cache/bhoptools", home);
-	mkdir(cache, 0755);
-	// Each download goes to the cache folder and is read back.
-	const upd::Fetch fetch = [&](const char* host, const std::string& path, std::string& body) {
-		const std::string file = std::string(cache) + "/download.tmp";
-		const bool ok = CurlDownload(("https://" + std::string(host) + path).c_str(), file.c_str());
-		body = ok ? ReadAll(file) : std::string();
-		unlink(file.c_str());
-		return ok;
-	};
-	upd::Release r;
-	std::string why;
-	const upd::Found found = upd::FindRelease(fetch, "bhoptools.so", ignored, r, why);
-	if (found == upd::Found::Nothing) return nullptr;
-	const std::string& tag = r.tag;
-	if (found == upd::Found::Unverified) {
-		CoreLog("not updating to %s: it couldn't be verified (%s)", tag.c_str(), why.c_str());
-		ShowSDLMessageBox(upd::UnverifiedText(r, why, "The current version (" APP_VERSION ") is unchanged.").c_str(), nullptr, 0);
-		return nullptr;
-	}
-	const std::string& base = r.url;
-	const std::string& soHash = r.expected;
-	std::string launcherHash;
-	// The launcher only prints launch options: if the release doesn't list it, it's left as it is.
-	const bool launcherListed = relsig::ParseSums(r.sums, tag, "bhoptools", launcherHash, why);
-
-	if (r.required) {
-		ShowSDLMessageBox(upd::OfferText(r).c_str(), nullptr, 0);
-	} else {
-		const SDL_MessageBoxButtonData buttons[] = {
-			{ 1, 0, "Update" },
-			{ 2, 1, "Ignore" },
-			{ 0, 2, "Ignore forever" },
-		};
-		const int answer = ShowSDLMessageBox(upd::OfferText(r).c_str(), buttons, 3);
-		if (answer == 2) {
-			settings::StopUpdateChecks();
-			return nullptr;
-		}
-		if (answer != 0) return nullptr;
-	}
-
-	Dl_info info;
-	if (!dladdr((void*)&UpdateThread, &info) || !info.dli_fname) return nullptr;
-	// Downloaded aside and checked: the constructor installs whatever .so.new it finds.
-	char soPath[PATH_MAX], newSo[PATH_MAX + 8], download[PATH_MAX + 16], url[256];
-	snprintf(soPath, sizeof(soPath), "%s", info.dli_fname);
-	snprintf(newSo, sizeof(newSo), "%s.new", soPath);
-	snprintf(download, sizeof(download), "%s.download", soPath);
-	snprintf(url, sizeof(url), "%sbhoptools.so", base.c_str());
-	char err[256];
-	std::string soDir = soPath;
-	soDir.erase(soDir.rfind('/'));
-	// Steam's container or a Flatpak can show a folder outside the library read-only.
-	if (access(soDir.c_str(), W_OK) != 0) {
-		const std::string why = strerror(errno);
-		const std::string saved = std::string(cache) + "/bhoptools.so";
-		if (!DownloadElf(url, saved.c_str(), soHash, err)) {
-			ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\n" + std::string(err)).c_str(), nullptr, 0);
-			return nullptr;
-		}
-		ShowSDLMessageBox(("The game can't write to bhoptools' folder (" + soDir + ": " + why + "), so " + tag
-			+ " is downloaded and checked here instead:\n\n" + saved + "\n\nClose the game and copy it over\n\n" + soPath
-			+ "\n\nor move bhoptools somewhere the game can write, like ~/.local/share/bhoptools, and change the launch options to match.").c_str(), nullptr, 0);
-		return nullptr;
-	}
-	if (!DownloadElf(url, download, soHash, err)) {
-		CoreLog("updating to %s failed: %s", tag.c_str(), err);
-		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\n" + std::string(err)).c_str(), nullptr, 0);
-		return nullptr;
-	}
-	if (rename(download, newSo) != 0) {
-		unlink(download);
-		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\ncan't rename the download: " + std::string(strerror(errno))).c_str(), nullptr, 0);
-		return nullptr;
-	}
-
-	char launcher[PATH_MAX + 32], newLauncher[PATH_MAX + 40];
-	snprintf(launcher, sizeof(launcher), "%s", soPath);
-	char* slash = strrchr(launcher, '/');
-	if (slash && launcherListed) {
-		strcpy(slash + 1, "bhoptools");
-		snprintf(newLauncher, sizeof(newLauncher), "%s.new", launcher);
-		snprintf(url, sizeof(url), "%sbhoptools", base.c_str());
-		if (access(launcher, F_OK) == 0 && DownloadElf(url, newLauncher, launcherHash, err)) {
-			chmod(newLauncher, 0755);
-			rename(newLauncher, launcher);
-		}
-	}
-	_exit(42);
 }
 
 // The launch goes through bash and reaper helpers; only the game process gets the installer.
@@ -1152,47 +1080,9 @@ static bool has_insecure_flag()
 	return false;
 }
 
-static void ReexecWith(const char* self, const char* so)
-{
-	if (getenv("BHOPTOOLS_REEXEC")) return;
-	std::string cmdline;
-	if (FILE* f = fopen("/proc/self/cmdline", "rb")) {
-		char chunk[4096];
-		size_t n;
-		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) cmdline.append(chunk, n);
-		fclose(f);
-	}
-	std::vector<char*> argv;
-	for (size_t i = 0; i < cmdline.size(); i += strlen(&cmdline[i]) + 1) argv.push_back(&cmdline[i]);
-	argv.push_back(nullptr);
-
-	std::string preload = getenv("LD_PRELOAD") ? getenv("LD_PRELOAD") : "";
-	const size_t at = preload.find(self);
-	if (at == std::string::npos) return;
-	preload = "LD_PRELOAD=" + preload.replace(at, strlen(self), so);
-	std::vector<char*> env;
-	for (char** e = environ; *e; e++)
-		if (strncmp(*e, "LD_PRELOAD=", 11)) env.push_back(*e);
-	env.push_back(&preload[0]);
-	env.push_back((char*)"BHOPTOOLS_REEXEC=1");
-	env.push_back(nullptr);
-	execve("/proc/self/exe", argv.data(), env.data());
-}
-
 __attribute__((constructor))
 static void bhoptools_ctor()
 {
-	// Installs a pending update. Inside the Steam container the rename fails with EBUSY, and the
-	// restarted game still has the old .so mapped, so it re-execs with the new one.
-	Dl_info info;
-	if (dladdr((void*)&bhoptools_ctor, &info) && info.dli_fname) {
-		char newSo[PATH_MAX + 8];
-		snprintf(newSo, sizeof(newSo), "%s.new", info.dli_fname);
-		const bool installed = rename(newSo, info.dli_fname) == 0;
-		if (is_game_process() && (installed || access(newSo, F_OK) == 0))
-			ReexecWith(info.dli_fname, installed ? info.dli_fname : newSo);
-	}
-
 	if (!is_game_process()) return;
 	if (!has_insecure_flag()) {
 		fprintf(stderr, "[bhoptools] -insecure is not on the command line, not installing\n");
@@ -1200,6 +1090,16 @@ static void bhoptools_ctor()
 	}
 	// LD_PRELOAD constructors run on the exec'd process's initial thread.
 	g_mainThread = pthread_self();
+	// Before the engine mounts cstrike/custom/*: Options > Keyboard's list with the bhoptools rows (keylists.h).
+	char exe[4096];
+	const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n > 0) {
+		exe[n] = 0;
+		if (char* slash = strrchr(exe, '/')) {
+			*slash = 0;
+			keylists::Write(std::string(exe) + "/cstrike/");
+		}
+	}
 
 	StartDetached(InstallerThread, nullptr);
 }

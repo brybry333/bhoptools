@@ -42,6 +42,9 @@ void Dispatch(int id, const void* data, int len);
 
 // hud_speed and hud_keys. On the thread that runs console commands.
 void RegisterCommands();
+// What bhoptools_ape_toggle (1, Windows only) and bhoptools_predict_toggle (4) do, bindable in Options > Keyboard.
+// Each OS has its own. Game thread (console commands run there).
+void HotkeyAction(int key);
 
 // Set by prediction; only the speed needs it.
 void SetEnabled(bool on);

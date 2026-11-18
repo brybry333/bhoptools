@@ -2,7 +2,6 @@
 #define _CRT_RAND_S
 #include <Windows.h>
 #include <winhttp.h>
-#include <CommCtrl.h>
 #include <atomic>
 #include <fstream>
 #include <functional>
@@ -13,10 +12,6 @@
 #include <stdlib.h>
 #include "utils.h"
 #include "version.h"
-#include "update_json.h"
-#include "file_util.h"
-#include "release_sig.h"
-#include "self_update.h"
 #include "sigs.h"
 #include "download_progress.h"
 #include "fastdl.h"
@@ -34,9 +29,8 @@
 #include "rawprecise.h"
 #include "mouse_split.h"
 #include "frametime_floor.h"
+#include "keylists.h"
 
-// TaskDialog needs common controls v6.
-#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 typedef void(__thiscall* CHostState_OnClientConnectedFn)(void*);
 CHostState_OnClientConnectedFn oCHostState_OnClientConnected;
@@ -73,9 +67,31 @@ double m_mouseSplitTime; // 0 until the first split (MouseSplitTake's neverSplit
 double m_mouseSampleTime;
 float m_flMouseSampleTime;
 
-// F5-F8 run from the game's WindowProc: the HUD and patched code aren't safe to touch from the injector thread.
+// bhoptools_ape_toggle / bhoptools_predict_toggle (bindable in Options > Keyboard) run on the game thread: the HUD and patched
+// code aren't safe to touch from the injector thread, which fills this in.
 std::function<void(int)> g_hotkey;
+// curtimefix is its own DLL (it can't live in this copied image): the launcher notes curtimefix.dll next to
+// bhoptools.exe here, a plain array travels with the copy; the game half loads it and the Options tab drives it.
+wchar_t g_curtimefixDll[MAX_PATH];
+void (*g_curtimefixEnable)(bool);
+// CS:TV the same way: cstv_client.dll next to bhoptools.exe, its helper and files in the cstv folder beside it
+wchar_t g_cstvDll[MAX_PATH];
+void (*g_cstvEnable)(bool);
+// triggerlook (the trigger menu, triggerlook_menu) the same way: triggerlook.dll next to bhoptools.exe. Loading it is
+// all it needs: it starts itself on the game's main thread (and stays off if another copy already runs).
+wchar_t g_triggerlookDll[MAX_PATH];
+// paint (p2paint) the same way: p2paint.dll next to bhoptools.exe (maretf.exe beside it turns pictures into paint).
+// It starts itself like triggerlook; p2paint_enable is the Options switch, p2paint_server greys its row out.
+wchar_t g_p2paintDll[MAX_PATH];
+void (*g_p2paintEnable)(bool);
+int (*g_p2paintServer)();
+int PaintServerState() { return g_p2paintServer ? g_p2paintServer() : -1; }
 std::atomic<bool> g_hotkeyReady;
+
+void speedo::HotkeyAction(int key)
+{
+	if (g_hotkeyReady) g_hotkey(key);
+}
 
 int* m_mouseRawAccumX;
 int* m_mouseRawAccumY;
@@ -232,22 +248,6 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 		rawprecise::RegisterCommands();
 	// GameUI's vtables are patched on the game thread.
 	if (g_hotkeyReady) core::PollLateInstalls(MonotonicSeconds());
-	switch (uMsg)
-	{
-	case WM_SYSKEYDOWN:
-	case WM_KEYDOWN:
-		{
-			// Bit 30 is the previous key state, so this skips autorepeat.
-			if ((lParam & 0x40000000) == 0) {
-				if (wParam >= VK_F5 && wParam <= VK_F8) {
-					if (g_hotkeyReady)
-						g_hotkey((int)(wParam - VK_F5 + 1));
-				}
-			}
-			break;
-		}
-	}
-
 	return oWindowProc(thisptr, hwnd, uMsg, wParam, lParam);
 }
 
@@ -367,36 +367,6 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 
 #define SETTINGS_DIR_W L"bhoptools"
 
-// Update / Not now / Don't ask again. Returns IDYES, IDNO or IDCANCEL.
-static int AskUpdate(const wchar_t* text, const wchar_t* title)
-{
-	typedef HRESULT (WINAPI *TaskDialogIndirectFn)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
-	const HMODULE comctl = LoadLibraryW(L"comctl32.dll");
-	const auto taskDialog = comctl ? reinterpret_cast<TaskDialogIndirectFn>(GetProcAddress(comctl, "TaskDialogIndirect")) : nullptr;
-	if (taskDialog)
-	{
-		// Own ids, so closing the dialog (IDCANCEL) counts as "Not now".
-		const int kUpdate = 100, kNotNow = 101, kNever = 102;
-		const TASKDIALOG_BUTTON buttons[] = { { kUpdate, L"Update" }, { kNotNow, L"Not now" }, { kNever, L"Don't ask again" } };
-		TASKDIALOGCONFIG config = { sizeof(config) };
-		config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
-		config.pszWindowTitle = title;
-		config.pszMainIcon = TD_INFORMATION_ICON;
-		config.pszContent = text;
-		config.pButtons = buttons;
-		config.cButtons = 3;
-		config.nDefaultButton = kUpdate;
-		config.pfCallback = [](HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR) -> HRESULT {
-			if (msg == TDN_CREATED)
-				SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-			return S_OK;
-		};
-		int answer = 0;
-		if (SUCCEEDED(taskDialog(&config, &answer, NULL, NULL)))
-			return answer == kUpdate ? IDYES : answer == kNever ? IDCANCEL : IDNO;
-	}
-	return MessageBoxW(NULL, text, title, MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
-}
 
 // %APPDATA%\bhoptools\tmp, for downloads and the lump
 // checksums, with the .part files of downloads that never finished removed. A download still
@@ -427,11 +397,6 @@ std::wstring TempDir()
 	return dir;
 }
 
-std::string ReadAll(const std::wstring& path)
-{
-	std::ifstream in(path, std::ios::binary);
-	return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-}
 
 FILE* fastdl::OpenLumpChecksums()
 {
@@ -820,6 +785,38 @@ DWORD InjectionEntryPoint(DWORD processID)
 		CoreLog("DetourTransactionCommit failed (%ld), no hooks installed", err);
 	else if (fastdlReady)
 		CloseHandle(CreateThread(nullptr, 0, LumpChecksumsThread, nullptr, 0, nullptr));
+	if (g_curtimefixDll[0])
+	{
+		const HMODULE h = LoadLibraryW(g_curtimefixDll);
+		g_curtimefixEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "curtimefix_enable")) : nullptr;
+		if (g_curtimefixEnable)
+			g_curtimefixEnable(settings::Get().curtimefix);
+		else if (h)
+			CoreLog("curtimefix: curtimefix.dll is too old for the Options tab (needs 1.3)");
+		else
+			CoreLog("curtimefix: couldn't load curtimefix.dll (error %lu)", GetLastError());
+	}
+	if (g_cstvDll[0])
+	{
+		const HMODULE h = LoadLibraryW(g_cstvDll);
+		g_cstvEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "cstv_enable")) : nullptr;
+		if (g_cstvEnable)
+			g_cstvEnable(settings::Get().cstv);
+		else
+			CoreLog("CS:TV: couldn't load cstv_client.dll (error %lu)", GetLastError());
+	}
+	if (g_triggerlookDll[0] && !LoadLibraryW(g_triggerlookDll))
+		CoreLog("triggerlook: couldn't load triggerlook.dll (error %lu)", GetLastError());
+	if (g_p2paintDll[0])
+	{
+		const HMODULE h = LoadLibraryW(g_p2paintDll);
+		g_p2paintEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "p2paint_enable")) : nullptr;
+		g_p2paintServer = h ? reinterpret_cast<int (*)()>(GetProcAddress(h, "p2paint_server")) : nullptr;
+		if (g_p2paintEnable)
+			g_p2paintEnable(settings::Get().paint);	// (before it's up: it applies it when it starts)
+		else
+			CoreLog("paint: couldn't load p2paint.dll (error %lu)", GetLastError());
+	}
 
 	bool jumpPredPatched = false;
 	core::SyncPredict();
@@ -829,6 +826,12 @@ DWORD InjectionEntryPoint(DWORD processID)
 		core::SyncPredict();
 		if (viewpunchRemoved != s.viewpunch)
 			setViewpunch(s.viewpunch);
+		if (g_curtimefixEnable)
+			g_curtimefixEnable(s.curtimefix);
+		if (g_cstvEnable)
+			g_cstvEnable(s.cstv);
+		if (g_p2paintEnable)
+			g_p2paintEnable(s.paint);
 	});
 
 	g_hotkey = [&](int key)
@@ -856,6 +859,9 @@ DWORD InjectionEntryPoint(DWORD processID)
 		Sleep(200);
 	g_hotkeyReady = false;
 	settings::SetApply(nullptr);
+	// It can't be unloaded (its hooks stay), so it goes back to passing everything through.
+	if (g_curtimefixEnable)
+		g_curtimefixEnable(false);
 
 	if (g_rawInput2Ready)
 	{
@@ -1002,6 +1008,31 @@ std::string GetSteamPath()
 }
 
 // Assumes the libraryfolders.vdf is "well formed"
+// CS:TV's screen materials and fonts go in custom\cstv before the game starts (custom folders are read at boot).
+// From the cstv folder next to cstv_client.dll; always copied, so a redrawn texture of the same size updates too.
+static void InstallCstvFiles(const std::string& css_path)
+{
+	wchar_t game[MAX_PATH];
+	if (!MultiByteToWideChar(CP_ACP, 0, css_path.c_str(), -1, game, MAX_PATH)) return;
+	std::wstring src = g_cstvDll;
+	src.erase(src.rfind(L'\\') + 1);
+	src += L"cstv\\";
+	for (const wchar_t* sub : { L"materials\\cstv\\", L"resource\\cstv\\" })
+	{
+		const std::wstring dst = std::wstring(game) + L"cstrike\\custom\\cstv\\" + sub;
+		for (size_t i = wcslen(game); (i = dst.find(L'\\', i + 1)) != std::wstring::npos;)
+			CreateDirectoryW(dst.substr(0, i).c_str(), NULL);
+		WIN32_FIND_DATAW fd;
+		const HANDLE f = FindFirstFileW((src + sub + L"*").c_str(), &fd);
+		if (f == INVALID_HANDLE_VALUE) continue;
+		do
+			if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+				CopyFileW((src + sub + fd.cFileName).c_str(), (dst + fd.cFileName).c_str(), FALSE);
+		while (FindNextFileW(f, &fd));
+		FindClose(f);
+	}
+}
+
 std::string GetCSSPath(std::string const & steampath)
 {
 	std::ifstream libraryfolders(steampath + "\\steamapps\\libraryfolders.vdf");
@@ -1101,109 +1132,171 @@ std::string GetCSSLaunchOptions(std::string const & steampath, std::string const
 	return "";
 }
 
-// Offers to replace this exe with the latest release. True when the new copy was started.
-bool SelfUpdate()
+
+// Release builds carry the module DLLs, maretf.exe, CS:TV's game files and the licenses at the end of bhoptools.exe,
+// after the program image (so the copy that goes into the game doesn't carry them; client/windows/pack.py). They go
+// next to bhoptools.exe on start, rewritten only when they differ. CS:TV's video helper is the separate zip: it
+// unpacks into the same cstv folder.
+static void UnpackFiles()
 {
-	if (!strcmp(APP_VERSION, "dev"))
-		return false;
+	wchar_t exe[MAX_PATH];
+	const DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+	wchar_t* slash = n && n < MAX_PATH ? wcsrchr(exe, L'\\') : nullptr;
+	FILE* f = slash ? _wfopen(exe, L"rb") : nullptr;
+	if (!f) return;
+	const std::wstring dir(exe, slash + 1);
+	unsigned long long start = 0;
+	char magic[8] = {};
+	if (_fseeki64(f, -16, SEEK_END) || fread(&start, 8, 1, f) != 1 || fread(magic, 8, 1, f) != 1 || memcmp(magic, "BHTPACK1", 8)) {
+		fclose(f);
+		return;	// a plain build: the files are next to it already (or not)
+	}
+	const long long end = _ftelli64(f) - 16;
+	_fseeki64(f, (long long)start, SEEK_SET);
+	int written = 0;
+	while (_ftelli64(f) < end) {
+		unsigned int len = 0;
+		unsigned long long size = 0;
+		if (fread(&len, 4, 1, f) != 1 || !len || len > 512) break;
+		std::string rel(len, '\0');
+		if (fread(&rel[0], 1, len, f) != len || fread(&size, 8, 1, f) != 1 || size > (1ull << 30)) break;
+		std::vector<char> data((size_t)size);
+		if (size && fread(data.data(), 1, (size_t)size, f) != size) break;
+		std::wstring path = dir;
+		for (char c : rel) path += c == '/' ? L'\\' : (wchar_t)(unsigned char)c;
+		// the same bytes already there: leave it (a running game may hold it)
+		if (FILE* old = _wfopen(path.c_str(), L"rb")) {
+			std::vector<char> have(data.size() + 1);
+			const size_t got = fread(have.data(), 1, have.size(), old);
+			fclose(old);
+			if (got == data.size() && !memcmp(have.data(), data.data(), data.size())) continue;
+		}
+		for (size_t i = dir.size(); (i = path.find(L'\\', i)) != std::wstring::npos; ++i)
+			CreateDirectoryW(path.substr(0, i).c_str(), NULL);
+		const std::wstring tmp = path + L".tmp";
+		FILE* out = _wfopen(tmp.c_str(), L"wb");
+		const bool ok = out && fwrite(data.data(), 1, data.size(), out) == data.size();
+		if (out) fclose(out);
+		if (ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+			++written;
+		else {
+			DeleteFileW(tmp.c_str());
+			printf("couldn't write %s next to bhoptools.exe (still in use?)\n", rel.c_str());
+		}
+	}
+	fclose(f);
+	if (written) printf("unpacked %d files next to bhoptools.exe\n\n", written);
+}
 
-	const std::string ignoreFile = settings::NoUpdateCheckFile();
-	const bool ignored = !ignoreFile.empty() && GetFileAttributesA(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES;
-
-	wchar_t buf[MAX_PATH];
-	GetModuleFileNameW(NULL, buf, MAX_PATH);
-	const std::wstring self = buf;
-	const std::wstring old = self + L".old";
-	const std::wstring fresh = self + L".new";
-	// The previous update's exe was still running when it was renamed.
-	DeleteFileW(old.c_str());
-
-	const std::wstring tmp = TempDir();
-	if (tmp.empty())
-		return false;
-	// Each download goes to the temp folder and is read back.
-	const upd::Fetch fetch = [&](const char* host, const std::string& path, std::string& body)
-	{
-		const std::wstring file = tmp + L"\download.tmp";
-		const bool ok = HttpsDownload(std::wstring(host, host + strlen(host)).c_str(), std::wstring(path.begin(), path.end()).c_str(), file.c_str());
-		body = ok ? ReadAll(file) : std::string();
-		DeleteFileW(file.c_str());
-		return ok;
-	};
-	upd::Release r;
-	std::string err;
-	wchar_t wtext[2048];
-	const upd::Found found = upd::FindRelease(fetch, "bhoptools.exe", ignored, r, err);
-	if (found == upd::Found::Nothing)
-		return false;
-	if (found == upd::Found::Unverified)
-	{
-		printf("not updating to %s: it couldn't be verified (%s)\n\n", r.tag.c_str(), err.c_str());
-		MultiByteToWideChar(CP_UTF8, 0, upd::UnverifiedText(r, err, "Starting the current version (" APP_VERSION ").").c_str(), -1, wtext, 2048);
-		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONWARNING | MB_TOPMOST);
-		return false;
+// CS:TV's video helper: bhoptools-cstv-video.zip next to bhoptools.exe unpacks itself into the cstv folder there (no
+// unzipping by hand; a hand-unzipped cstv folder works too). The release zip is stored, not compressed
+// (tools/make-release.sh), so this only copies bytes; cstv\.zip-stamp remembers which zip it came from.
+static void UnpackCstvVideo()
+{
+	wchar_t exe[MAX_PATH];
+	const DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+	wchar_t* slash = n && n < MAX_PATH ? wcsrchr(exe, L'\\') : nullptr;
+	if (!slash) return;
+	const std::wstring dir(exe, slash + 1), zip = dir + L"bhoptools-cstv-video.zip", stampPath = dir + L"cstv\\.zip-stamp";
+	WIN32_FILE_ATTRIBUTE_DATA a;
+	if (!GetFileAttributesExW(zip.c_str(), GetFileExInfoStandard, &a)) return;
+	char stamp[64];
+	snprintf(stamp, sizeof(stamp), "%lu %lu %lu", a.nFileSizeLow, a.ftLastWriteTime.dwLowDateTime, a.ftLastWriteTime.dwHighDateTime);
+	if (FILE* s = _wfopen(stampPath.c_str(), L"rb")) {
+		char have[64] = {};
+		fread(have, 1, sizeof(have) - 1, s);
+		fclose(s);
+		if (!strcmp(have, stamp)) return;	// unpacked from this zip already
 	}
-
-	MultiByteToWideChar(CP_UTF8, 0, upd::OfferText(r).c_str(), -1, wtext, 2048);
-	if (r.required)
-	{
-		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+	FILE* f = _wfopen(zip.c_str(), L"rb");
+	if (!f) return;
+	printf("unpacking bhoptools-cstv-video.zip (CS:TV videos) ...\n");
+	// the end-of-central-directory record: the last 22+ bytes
+	_fseeki64(f, 0, SEEK_END);
+	const long long size = _ftelli64(f);
+	const long long tail = size < 65557 ? size : 65557;
+	std::vector<unsigned char> t((size_t)tail);
+	_fseeki64(f, size - tail, SEEK_SET);
+	fread(t.data(), 1, t.size(), f);
+	long long eocd = -1;
+	for (long long i = tail - 22; i >= 0; --i)
+		if (!memcmp(&t[(size_t)i], "PK\x05\x06", 4)) { eocd = i; break; }
+	auto u16 = [](const unsigned char* p) { return (unsigned)p[0] | (unsigned)p[1] << 8; };
+	auto u32 = [](const unsigned char* p) { return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24; };
+	bool ok = eocd >= 0;
+	unsigned count = ok ? u16(&t[(size_t)eocd + 10]) : 0, cd = ok ? u32(&t[(size_t)eocd + 16]) : 0;
+	int done = 0;
+	for (unsigned i = 0; ok && i < count; ++i) {
+		unsigned char h[46];
+		_fseeki64(f, cd, SEEK_SET);
+		if (fread(h, 1, 46, f) != 46 || memcmp(h, "PK\x01\x02", 4)) { ok = false; break; }
+		const unsigned method = u16(h + 10), csize = u32(h + 20), nameLen = u16(h + 28), extraLen = u16(h + 30),
+			commentLen = u16(h + 32), local = u32(h + 42);
+		std::string name(nameLen, '\0');
+		fread(&name[0], 1, nameLen, f);
+		cd += 46 + nameLen + extraLen + commentLen;
+		if (name.empty() || name.back() == '/' || name.find("..") != std::string::npos) continue;	// folders; nothing outside
+		if (method != 0) { printf("bhoptools-cstv-video.zip: %s is compressed, use the release zip\n", name.c_str()); ok = false; break; }
+		unsigned char lh[30];
+		_fseeki64(f, local, SEEK_SET);
+		if (fread(lh, 1, 30, f) != 30 || memcmp(lh, "PK\x03\x04", 4)) { ok = false; break; }
+		_fseeki64(f, (long long)local + 30 + u16(lh + 26) + u16(lh + 28), SEEK_SET);
+		std::wstring path = dir;
+		for (char c : name) path += c == '/' ? L'\\' : (wchar_t)(unsigned char)c;
+		for (size_t k = dir.size(); (k = path.find(L'\\', k)) != std::wstring::npos; ++k)
+			CreateDirectoryW(path.substr(0, k).c_str(), NULL);
+		FILE* out = _wfopen(path.c_str(), L"wb");
+		if (!out) { printf("couldn't write %s (still in use?)\n", name.c_str()); ok = false; break; }
+		std::vector<char> buf(1 << 20);
+		for (unsigned left = csize; left && ok;) {
+			const size_t want = left < buf.size() ? left : buf.size();
+			ok = fread(buf.data(), 1, want, f) == want && fwrite(buf.data(), 1, want, out) == want;
+			left -= (unsigned)want;
+		}
+		fclose(out);
+		++done;
 	}
-	else
-	{
-		const int answer = AskUpdate(wtext, L"bhoptools update");
-		if (answer == IDCANCEL)
-			settings::StopUpdateChecks();
-		if (answer != IDYES)
-			return false;
-	}
-	const std::string& tag = r.tag;
-	const std::string& expected = r.expected;
-	const std::wstring download = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/";
-
-	// Downloaded aside and checked before it goes next to the exe as .new.
-	const std::wstring exeFile = tmp + L"\\bhoptools.exe";
-	if (!HttpsDownload(L"github.com", (download + L"bhoptools.exe").c_str(), exeFile.c_str()))
-	{
-		printf("update download failed, starting the current version\n");
-		return false;
-	}
-	const std::string exe = ReadAll(exeFile);
-	if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z' || relsig::Sha256Hex(exe) != expected)
-	{
-		DeleteFileW(exeFile.c_str());
-		printf("not updating to %s: the downloaded bhoptools.exe isn't the one its SHA256SUMS lists\n", tag.c_str());
-		const std::string text = "The downloaded " + tag + " isn't the bhoptools.exe its signed SHA256SUMS lists, so it wasn't installed.\n\nStarting the current version (" APP_VERSION ").";
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
-		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONWARNING | MB_TOPMOST);
-		return false;
-	}
-	if (!MoveFileExW(exeFile.c_str(), fresh.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
-	{
-		DeleteFileW(exeFile.c_str());
-		printf("couldn't put the update next to the exe, starting the current version\n");
-		return false;
-	}
-
-	if (!MoveFileExW(self.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)
-			|| !MoveFileExW(fresh.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING))
-	{
-		MoveFileExW(old.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING);
-		printf("couldn't replace the exe, starting the current version\n");
-		return false;
-	}
-	STARTUPINFOW si = {};
-	PROCESS_INFORMATION pi = {};
-	return CreateProcessW(self.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) != 0;
+	fclose(f);
+	if (!ok) { printf("bhoptools-cstv-video.zip couldn't be unpacked: CS:TV videos stay off\n\n"); return; }
+	if (FILE* s = _wfopen(stampPath.c_str(), L"wb")) { fputs(stamp, s); fclose(s); }
+	printf("unpacked %d files: CS:TV videos are on\n\n", done);
 }
 
 // Credits: https://github.com/alkatrazbhop/BunnyhopAPE
 int main()
 {
 	SetConsoleTitle("bhoptools x64");
-	printf("bhoptools " APP_VERSION "\nhttps://github.com/ddyfad/bhoptools\n\n");
-	if (SelfUpdate())
-		return 0;
+	printf("bhoptools " APP_VERSION " (fork of https://github.com/ddyfad/bhoptools, no auto-updates)\n\n");
+	UnpackFiles();
+	UnpackCstvVideo();
+	{
+		// a DLL next to bhoptools.exe, or empty
+		auto nextToExe = [](wchar_t* out, const wchar_t* name)
+		{
+			const DWORD n = GetModuleFileNameW(NULL, out, MAX_PATH);
+			wchar_t* slash = n && n < MAX_PATH ? wcsrchr(out, L'\\') : nullptr;
+			if (!slash || (size_t)(slash - out) + wcslen(name) + 2 > MAX_PATH)
+				out[0] = 0;
+			else
+			{
+				wcscpy(slash + 1, name);
+				if (GetFileAttributesW(out) == INVALID_FILE_ATTRIBUTES)
+					out[0] = 0;
+			}
+		};
+		nextToExe(g_curtimefixDll, L"curtimefix.dll");
+		if (!g_curtimefixDll[0])
+			printf("curtimefix.dll isn't next to bhoptools.exe, the curtimefix option does nothing\n\n");
+		nextToExe(g_cstvDll, L"cstv_client.dll");
+		if (!g_cstvDll[0])
+			printf("cstv_client.dll isn't next to bhoptools.exe, the CS:TV option does nothing\n\n");
+		nextToExe(g_triggerlookDll, L"triggerlook.dll");
+		if (!g_triggerlookDll[0])
+			printf("triggerlook.dll isn't next to bhoptools.exe, no trigger menu\n\n");
+		nextToExe(g_p2paintDll, L"p2paint.dll");
+		if (!g_p2paintDll[0])
+			printf("p2paint.dll isn't next to bhoptools.exe, no paint\n\n");
+	}
 
 	auto steam_path = GetSteamPath();
 	printf("steampath = %s\n", steam_path.c_str());
@@ -1227,6 +1320,11 @@ int main()
 		}
 	}
 	auto css_exe = css_path + "cstrike_win64.exe";
+	// Before the game starts and mounts cstrike\custom\*: Options > Keyboard's list with the bhoptools rows,
+	// and CS:TV's screen materials and fonts (always copied: a redrawn texture keeps its size).
+	keylists::Write(css_path + "cstrike\\");
+	if (g_cstvDll[0])
+		InstallCstvFiles(css_path);
 
 	HANDLE game = NULL;
 	DWORD game_pid = 0;
@@ -1319,7 +1417,7 @@ int main()
 		}
 	}
 
-	printf("Options > bhoptools switches mouse interpolation (it sets m_rawinput) and the rest\n\nPress F5 to toggle BunnyhopAPE autobhop prediction (OFF by default)\nPress F8 to toggle all client-side prediction: triggers, rngfix, checkpoints, HUD speed (on by default)\n");
+	printf("Options > bhoptools switches mouse interpolation (it sets m_rawinput) and the rest\n\nF8 toggles all client-side prediction: triggers, rngfix, checkpoints, HUD speed (on by default)\nBunnyhopAPE autobhop prediction (off by default) has no key until you set one\nKeys: Options > Keyboard > bhoptools\n");
 
 	LogTime("client.dll loaded, injecting");
 	PEInjector(game, InjectionEntryPoint);

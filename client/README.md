@@ -56,16 +56,16 @@ Downloads
 Options tab
 * `bhoptools` replaces the Multiplayer tab in Options: rawinput2 (mouse interpolation), prediction and clientside hud fixes (predicted speed, the local key overlay and bgs-jumpstats' HUD together). Everything is saved in `settings.cfg` (`rawinput`, `predict`, `viewpunch`, `fastdl`, `speedo`, `hudkeys`, `jsframe`, `chatglyphs`, `pollfix`); the fastdl.me map fix is only switched there, the chat glyph fallback with `chat_glyphs`.
 
-Hotkeys and console commands
-* `F5`: BunnyhopAPE autohop prediction (Windows only, not saved).
-* `F8`: prediction, saved.
+Keys and console commands
+* Options > Keyboard has a bhoptools section at the top: Toggle prediction (`F8`, saved), on Windows Toggle BunnyhopAPE (not saved), and Open / close CS:TV and the Progress Log. They are ordinary binds, kept in `config.cfg` like any other key. Only `F8` gets a default, once and only if `F8` has no bind of yours, so a key you clear stays clear; the rest have none, so they never take one of your keys. "Use Defaults" there also puts `F8` back. The list is `cstrike/custom/bhoptools/scripts/kb_act.lst` (these rows, then CS:S's own list, with `kb_def.lst` for the defaults), written at every start.
+* `bhoptools_predict_toggle` and, on Windows, `bhoptools_ape_toggle`: what those keys run. `bhoptools_cstv 0/1`: CS:TV on or off.
 * `bhoptools_predict 0/1`, `hud_speed 0/1`, `hud_keys 0/1`, `bhoptools_viewpunch 0/1` (the viewpunch remover, on by default), on Windows `bhoptools_pollfix 0/1` (the high polling rate fix) and `bhoptools_pumpstats` (prints and resets the input loop counters), and on Linux `chat_glyphs 0/1`. With no argument they print the current state. All saved.
 * `bhoptools_log` starts or stops writing debug info to `cstrike/bhoptools_log.txt`: what's predicted and what isn't, every correction from the server and its likely cause, and every `[bhoptools]` console message while it's on. Send that file with a bug report.
 * Hidden (left out of `find` and autocomplete): the server plugin's protocol commands (`bhoptools_caps`, `bhoptools_ack`, `bhoptools_chat`, `bhoptools_menu`, `bhoptools_ask`, `bhoptools_rngcvars`, `bhoptools_autobhop`, `bhoptools_noclip`, `bhoptools_move`, `bhoptools_lfskip`, `bhoptools_msf`, `bhoptools_cpset`, `bhoptools_keys`, `bhoptools_autosync`, `bhoptools_ents`, `bhoptools_player`, `bhoptools_sync`, `bhoptools_restart`, `bhoptools_frames`), the shavit command names listed above, and `say`/`say_team` when the game doesn't have its own. The shavit names and protocol commands can also be run by the server.
 
 Windows and Linux
-* Windows: an injector starts CS:S with `-console -novid -insecure`. `F5` and `F8` work.
-* Linux: `bhoptools` prints launch options for `LD_PRELOAD`, and the preload only acts when the game runs with `-insecure`. Only `F8` exists.
+* Windows: an injector starts CS:S with `-console -novid -insecure`.
+* Linux: `bhoptools` prints launch options for `LD_PRELOAD`, and the preload only acts when the game runs with `-insecure`.
 * Linux only: chat glyph fallback (`chat_glyphs`), including combining marks and Tibetan, and the one-character texture folder fix.
 * Autohop prediction is not available on Linux.
 
@@ -73,10 +73,11 @@ Windows and Linux
 * Download the latest release from the [Releases](../../releases) page.
 * Windows: run `bhoptools.exe`. It starts the game with `-insecure` for you.
 * Linux: put `bhoptools.so` and `bhoptools` somewhere without spaces or `:` in the path, run `./bhoptools` and paste the launch options it prints.
-* Updates: on start it checks for a newer release and offers it, with the notes of every release since yours. A release is only installed when its `SHA256SUMS` is signed by the bhoptools release key and lists the file downloaded (the first signed release reaches older versions without that check).
-  * Windows: Yes replaces the exe and starts the new one, No asks again next time, Cancel stops checking.
-  * Linux: the popup comes up with the game window (Update, Ignore, Ignore forever). Update downloads the new `.so` next to the old one and restarts the game into it. The files are swapped on the next launch from Steam.
-  * To check again after turning it off, delete `no_update_check` from the settings folder below.
+* No auto-updates in this fork: it never checks for or downloads releases. Get new versions from the Releases page yourself.
+* curtimefix (smooth movement on maps that have been running a long time, [brybry333/curtimefix](https://github.com/brybry333/curtimefix) 1.3+): put `libcurtimefix.so` next to `bhoptools.so`, or `curtimefix.dll` next to `bhoptools.exe`. bhoptools loads it and Options → `curtimefix` switches it on and off. Without the file the option does nothing.
+* triggerlook (the triggers a server shows, in your own look; `triggerlook_menu`, [brybry333/triggerlook](https://github.com/brybry333/triggerlook) 1.0+): put `triggerlook.so` next to `bhoptools.so`, or `triggerlook.dll` next to `bhoptools.exe`. bhoptools loads it; it writes its own material and font into the game at its first start. A copy that's already loaded on its own is left alone.
+* paint ([brybry333/p2paint](https://github.com/brybry333/p2paint); needs its paint_3 plugin on the server): put `p2paint.so` next to `bhoptools.so`, or `p2paint.dll` (+ `maretf.exe` for pictures) next to `bhoptools.exe`. bhoptools loads it and drives Options → `paint` (`p2paint_enable`); the row greys out on servers without the plugin (`p2paint_server`). Off = the server's classic paint from the next join. Options → Keyboard: Open the paint menu, Paint (hold), Erase paint (hold); no default keys. It writes its own materials and font into the game at its first start; a copy already loaded on its own (libp2paint.so preload) keeps running and the switch can't reach it.
+* CS:TV (in-game video screens, [brybry333/cstv](https://github.com/brybry333/cstv), source in `cstv/`). Windows: `cstv_client.dll` and the `cstv` folder next to `bhoptools.exe`; bhoptools loads it and installs its materials before starting the game. Linux: the `cstv` folder next to `bhoptools.so`; the launch options `./bhoptools` prints go through `cstv/cstv-launch`, which starts CS:TV's helper outside Steam's runtime (it needs mpv, yt-dlp, streamlink and Python 3 with Pillow). Options → `CS:TV (video screens)` or `bhoptools_cstv 0/1` switches it; its keys (window, Progress Log) are in Options → Keyboard with none by default. Build it with `cstv/make-dist-linux.sh`, or `cstv/win/build.sh` and `cstv/win/make-dist-windows.sh`, from a path without spaces.
 * Everything is switched from Options → `Fixes` or the hotkeys and commands above. Settings are kept in `%APPDATA%\bhoptools\settings.cfg` or `~/.config/bhoptools/settings.cfg`. With zastools loaded the tab is left to it.
 * Only join servers the server browser shows as insecure.
 
@@ -90,7 +91,8 @@ Windows and Linux
 ### Building
 - `git clone --recurse-submodules https://github.com/ddyfad/bhoptools.git`
 - Windows: build `bhoptools.sln` with Visual Studio 2022+ (Release x64).
-- Linux: `make -C linux`, then `make -C tests test` for the release signature test.
+- Windows on Linux: `windows/build.sh` (clang-cl + lld-link with [xwin](https://github.com/Jake-Shadle/xwin)'s MSVC CRT/SDK in `~/.local/share/xwin`), output `windows/build/bhoptools.exe`.
+- Linux: `make -C linux`, then `make -C linux check-glibc`.
 - `shared/` is the prediction code, `windows/` and `linux/` load it into the game.
 
 ### Credits
@@ -102,6 +104,4 @@ Windows and Linux
 - [zas](https://github.com/zasbu/zastools): zastools, where the Linux chat glyph fallback comes from.
 
 ### Third-party code
-- [Monocypher](https://monocypher.org/) 4.0.3 (`shared/vendor/monocypher`), BSD-2-Clause or CC0-1.0 (`LICENCE.md` there): ed25519 and SHA-512 for checking signed updates.
-- [Brad Conte's crypto-algorithms](https://github.com/B-Con/crypto-algorithms) SHA-256 (`shared/vendor/sha256`), public domain.
 - [Microsoft Detours](https://github.com/microsoft/Detours) (`windows/Detours`, submodule), MIT.
