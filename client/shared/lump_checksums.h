@@ -1,4 +1,5 @@
 #pragma once
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +15,9 @@ inline bool LumpChecksumsFindSha1(const char* csv, const unsigned char md5[16], 
 		found = strstr(csv, key);
 	}
 	if (!found || found - csv < 41 || found[-1] != ',') return false;
+	// it becomes maps/<sha1>.bsp: from the network, so only hex gets through
+	for (int i = 0; i < 40; ++i)
+		if (!isxdigit((unsigned char)found[i - 41])) return false;
 	memcpy(sha1, found - 41, 40);
 	sha1[40] = 0;
 	return true;

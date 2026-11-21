@@ -11,6 +11,7 @@ public Action Timer_CheckRngfix(Handle timer)
 	UpdateMsf();
 	UpdateSyncstyle();
 	UpdateZones();
+	gB_HaveNoclipCmd = CommandExists("sm_nc");
 	return Plugin_Continue;
 }
 

@@ -154,7 +154,8 @@ struct SkTracker {
 		if (r.cmd == cmd - 1) return r.state;
 		if (prev.cmd == cmd - 1 && prev.seq == r.seq) return prev.after;
 		SkState st = r.state;
-		for (int c = cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd + 1; c < cmd; ++c) {
+		// (64-bit, and no later than cmd: a server's report can name any command number)
+		for (int c = (long long)cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd < cmd ? r.cmd + 1 : cmd; c < cmd; ++c) {
 			Run& run = runs[c & (kRuns - 1)];
 			if (run.cmd != c) continue;
 			SkMove m = run.move;

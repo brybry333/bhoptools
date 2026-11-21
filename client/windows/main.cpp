@@ -77,6 +77,7 @@ void (*g_curtimefixEnable)(bool);
 // CS:TV the same way: cstv_client.dll next to bhoptools.exe, its helper and files in the cstv folder beside it
 wchar_t g_cstvDll[MAX_PATH];
 void (*g_cstvEnable)(bool);
+bool (*g_cstvRawMotion)(int, int);
 // triggerlook (the trigger menu, triggerlook_menu) the same way: triggerlook.dll next to bhoptools.exe. Loading it is
 // all it needs: it starts itself on the game's main thread (and stays off if another copy already runs).
 wchar_t g_triggerlookDll[MAX_PATH];
@@ -102,13 +103,23 @@ bool g_rawInput2Ready = false;
 // NEXTRAWINPUTBLOCK uses QWORD, which no SDK header defines.
 typedef unsigned __int64 QWORD;
 
+// While the CS:TV window is open its cursor takes the motion; the view doesn't turn.
+bool CstvTookMotion(int dx, int dy)
+{
+	return g_cstvRawMotion && (dx || dy) && g_cstvRawMotion(dx, dy);
+}
+
 void AddRawMouse(const RAWINPUT* ri)
 {
 	if (ri->header.dwType == RIM_TYPEMOUSE)
 	{
-		*m_mouseRawAccumX += ri->data.mouse.lLastX;
-		*m_mouseRawAccumY += ri->data.mouse.lLastY;
-		pollfix::OnRawMouse(ri->data.mouse);
+		const RAWMOUSE& m = ri->data.mouse;
+		if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) || !CstvTookMotion(m.lLastX, m.lLastY))
+		{
+			*m_mouseRawAccumX += m.lLastX;
+			*m_mouseRawAccumY += m.lLastY;
+		}
+		pollfix::OnRawMouse(m);
 	}
 }
 
@@ -165,6 +176,9 @@ bool GetRawMouseAccumulators(int& accumX, int& accumY, double frame_split)
 		accumX += *m_mouseRawAccumX;
 		accumY += *m_mouseRawAccumY;
 		*m_mouseRawAccumX = *m_mouseRawAccumY = 0;
+		// rawprecise's thread never goes through AddRawMouse.
+		if (CstvTookMotion(accumX, accumY))
+			accumX = accumY = 0;
 		return *m_bRawInputSupported;
 	}
 
@@ -399,12 +413,13 @@ std::wstring TempDir()
 }
 
 
-FILE* fastdl::OpenLumpChecksums()
+// %APPDATA%\bhoptools\tmp\<name>, downloaded again once older than maxAge seconds (a failed download keeps the old one)
+FILE* OpenCached(const wchar_t* name, const wchar_t* host, const wchar_t* urlPath, unsigned long long maxAge)
 {
 	const std::wstring dir = TempDir();
 	if (dir.empty())
 		return nullptr;
-	const std::wstring file = dir + L"\\lump_checksums.csv";
+	const std::wstring file = dir + L"\\" + name;
 	const wchar_t* path = file.c_str();
 
 	WIN32_FILE_ATTRIBUTE_DATA attr;
@@ -418,17 +433,45 @@ FILE* fastdl::OpenLumpChecksums()
 		mtime.LowPart = attr.ftLastWriteTime.dwLowDateTime; mtime.HighPart = attr.ftLastWriteTime.dwHighDateTime;
 		// FILETIME counts 100 ns.
 		const unsigned long long age = now.QuadPart > mtime.QuadPart ? now.QuadPart - mtime.QuadPart : mtime.QuadPart - now.QuadPart;
-		fresh = age < 36ull * 60 * 60 * 10000000;
+		fresh = age < maxAge * 10000000;
 	}
 	if (!fresh)
-		HttpsDownload(L"venus.fastdl.me", L"/lump_checksums.csv", path);
+		HttpsDownload(host, urlPath, path);
 	return _wfopen(path, L"rb");
 }
 
-DWORD WINAPI LumpChecksumsThread(LPVOID)
+FILE* fastdl::OpenLumpChecksums()
+{
+	return OpenCached(L"lump_checksums.csv", L"venus.fastdl.me", L"/lump_checksums.csv", 36ull * 60 * 60);
+}
+
+DWORD WINAPI StartupFetchThread(LPVOID)
 {
 	fastdl::LoadLumpChecksums();
+	if (FILE* f = OpenCached(L"latest_release.json", L"api.github.com", L"/repos/" APP_REPO L"/releases/latest", 6ull * 60 * 60))
+	{
+		options::ReadLatestRelease(f);
+		fclose(f);
+	}
 	return 0;
+}
+
+// The default browser. Resolved here like WinHTTP (the injected image's imports only hold for DLLs mapped where the
+// launcher saw them), on its own thread: the shell can take a moment.
+DWORD WINAPI OpenUrlThread(LPVOID url)
+{
+	typedef HINSTANCE(WINAPI* ShellExecuteA_t)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
+	HMODULE h = LoadLibraryA("shell32.dll");
+	auto exec = h ? (ShellExecuteA_t)GetProcAddress(h, "ShellExecuteA") : nullptr;
+	if (!exec || (INT_PTR)exec(nullptr, "open", (const char*)url, nullptr, nullptr, SW_SHOWNORMAL) <= 32)
+		CoreLog("options: couldn't open %s", (const char*)url);
+	return 0;
+}
+
+void OpenUrl(const char* url)
+{
+	if (HANDLE t = CreateThread(nullptr, 0, OpenUrlThread, (LPVOID)url, 0, nullptr))
+		CloseHandle(t);
 }
 
 // What Linux's CDownloadManager::Queue does for an https base URL: a .bz2 attempt, then the file.
@@ -784,8 +827,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 	pollfix::Attach();
 	if (LONG err = DetourTransactionCommit())
 		CoreLog("DetourTransactionCommit failed (%ld), no hooks installed", err);
-	else if (fastdlReady)
-		CloseHandle(CreateThread(nullptr, 0, LumpChecksumsThread, nullptr, 0, nullptr));
+	// the lump checksums and the update check, also when fastdl's hooks are off (then a fixed release may be out)
+	CloseHandle(CreateThread(nullptr, 0, StartupFetchThread, nullptr, 0, nullptr));
 	if (g_curtimefixDll[0])
 	{
 		const HMODULE h = LoadLibraryW(g_curtimefixDll);
@@ -801,6 +844,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 	{
 		const HMODULE h = LoadLibraryW(g_cstvDll);
 		g_cstvEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "cstv_enable")) : nullptr;
+		g_cstvRawMotion = h ? reinterpret_cast<bool (*)(int, int)>(GetProcAddress(h, "cstv_raw_motion")) : nullptr;
 		if (g_cstvEnable)
 			g_cstvEnable(settings::Get().cstv);
 		else

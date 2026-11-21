@@ -1,6 +1,6 @@
 # bhoptools
 
-Server side of client-predicted checkpoint saves and teleports for shavit in CS:S. The client half is [bhoptools](https://github.com/ddyfad/bhoptools), for Windows and Linux: it predicts a save or teleport on the command you press it, and this plugin does the same thing on the same usercmd, so nothing waits a round trip and prediction doesn't correct it afterwards.
+Server side of client-predicted checkpoint saves and teleports for shavit in CS:S. The client half is [bhoptools](https://github.com/brybry333/bhoptools) (this fork of [ddyfad/bhoptools](https://github.com/ddyfad/bhoptools)), for Windows and Linux: it predicts a save or teleport on the command you press it, and this plugin does the same thing on the same usercmd, so nothing waits a round trip and prediction doesn't correct it afterwards.
 
 Saves and teleports go through `impulse 150` and `impulse 151`. A usercmd carries its impulse, so the client and the server both know exactly which command the teleport happens on. On a server running this plugin the client sends `sm_save` and `sm_tele` as those impulses, so existing binds work. Noclip, restart and setstart work the same way (see below).
 
@@ -216,9 +216,9 @@ bhoptools_hold <session> <armed> <command>
 
 `<armed>`: 1 when a teleport now would be held: the player has freeze on, the timer is started (not stopped, more than five ticks old) and not paused. The client then holds after a checkpoint teleport it predicts: from the teleport command itself it holds the player at the checkpoint with no velocity and `MOVETYPE_NONE` (betterseg sets `MOVETYPE_NONE` right after the teleport for these clients, so the teleport command doesn't move either), and on the first command with forward or side movement (read before key blocking), or once `<armed>` goes to 0, it restores the checkpoint's velocity and movetype for that command. For these clients the plugin also calls `BetterSeg_SetPredictedHold(client, true)`, which stops betterseg ramping their speed after the release (that only hid the round trip this removes).
 
-## Updating
+## Installing and updating
 
-The plugin is released separately from the client, as the `plugin` pre-release (the client ignores pre-releases): `bhoptools.smx` (the newest, for a first install), `bhoptools-<version>.smx` for each version, and `manifest.json` with the newest version, its size and SHA-256. Put `bhoptools.smx` in `addons/sourcemod/plugins/` once. After that the plugin keeps itself up to date (it needs the ripext extension): after configs load, at most once an hour, it reads the manifest, and when the version differs it downloads `bhoptools-<version>.smx`, checks its size, header and SHA-256, and reloads itself when nobody is on or the map ends, keeping the old file as `bhoptools.smx.bak`. `sm_bhoptools_autoupdate 0` turns it off and `sm_bhoptools_checkupdate` checks now. A plugin built from source (version `dev`) never updates.
+Build `bhoptools.smx` from `scripting/bhoptools.sp` with SourceMod's compiler and put it in `addons/sourcemod/plugins/`. It never updates itself and never contacts GitHub: to update, build the new version and replace the file.
 
 ## Touch links
 

@@ -13,6 +13,9 @@
 #include <link.h>
 #include <climits>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <spawn.h>
+#include <vector>
 
 #include "utils.h"
 #include "mouse_split.h"
@@ -27,6 +30,7 @@
 #include "fastdl.h"
 #include "settings.h"
 #include "options_tab.h"
+#include "version.h"
 #include "spectate.h"
 #include "client_core.h"
 #include "singleletter_fix.h"
@@ -430,26 +434,57 @@ static void StartDetached(void* (*fn)(void*), void* arg)
 }
 
 
-FILE* fastdl::OpenLumpChecksums()
+// ~/.cache/bhoptools/<name>, downloaded again once older than maxAge seconds (a failed download keeps the old one)
+static FILE* OpenCached(const char* name, const char* url, long maxAge)
 {
 	const char* home = getenv("HOME");
 	if (!home) return nullptr;
 	char dir[PATH_MAX], path[PATH_MAX + 32];
 	snprintf(dir, sizeof(dir), "%s/.cache/bhoptools", home);
-	snprintf(path, sizeof(path), "%s/lump_checksums.csv", dir);
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
 	mkdir(dir, 0755);
 
 	struct stat st;
-	bool fresh = stat(path, &st) == 0 && labs((long)(time(nullptr) - st.st_mtime)) < 36 * 60 * 60;
+	bool fresh = stat(path, &st) == 0 && labs((long)(time(nullptr) - st.st_mtime)) < maxAge;
 	if (!fresh)
-		CurlDownload("https://venus.fastdl.me/lump_checksums.csv", path);
+		CurlDownload(url, path);
 	return fopen(path, "rb");
 }
 
-static void* LumpChecksumsThread(void*)
+FILE* fastdl::OpenLumpChecksums()
+{
+	return OpenCached("lump_checksums.csv", "https://venus.fastdl.me/lump_checksums.csv", 36 * 60 * 60);
+}
+
+static void* StartupFetchThread(void*)
 {
 	fastdl::LoadLumpChecksums();
+	if (FILE* f = OpenCached("latest_release.json", "https://api.github.com/repos/" APP_REPO "/releases/latest", 6 * 60 * 60)) {
+		options::ReadLatestRelease(f);
+		fclose(f);
+	}
 	return nullptr;
+}
+
+static void* ReapThread(void* pid)
+{
+	waitpid((pid_t)(intptr_t)pid, nullptr, 0);
+	return nullptr;
+}
+
+// xdg-open (Steam's runtime container passes it on to the desktop), without our LD_PRELOAD in its environment
+void OpenUrl(const char* url)
+{
+	std::vector<char*> env;
+	for (char** e = environ; *e; ++e)
+		if (strncmp(*e, "LD_PRELOAD=", 11) != 0) env.push_back(*e);
+	env.push_back(nullptr);
+	char* argv[] = { (char*)"xdg-open", (char*)url, nullptr };
+	pid_t pid;
+	if (posix_spawnp(&pid, "xdg-open", nullptr, nullptr, argv, env.data()) == 0)
+		StartDetached(ReapThread, (void*)(intptr_t)pid);
+	else
+		CoreLog("options: couldn't start xdg-open for %s", url);
 }
 
 typedef void (*CDownloadManager_Queue_t)(void* self, const char* baseURL, const char* urlPath, const char* gamePath);
@@ -513,9 +548,6 @@ static void InstallFastdl()
 			HOOK_COPY_CDownloadManager_Queue, (void**)&g_originalQueue))
 		InstallHook(psi, (uintptr_t)&fastdl::Hooked_ProcessServerInfo,
 			HOOK_COPY_CClientState_ProcessServerInfo, (void**)&fastdl::oProcessServerInfo);
-
-	CurlGlobalInit();
-	StartDetached(LumpChecksumsThread, nullptr);
 }
 
 typedef void (*GetAccumulatedMouseDeltas_t)(void* self, float* mx, float* my);
@@ -583,7 +615,7 @@ static void FindCstv()
 {
 	g_cstvEnable = (CstvEnable_t)dlsym(RTLD_DEFAULT, "cstv_enable");
 	if (g_cstvEnable) g_cstvEnable(settings::Get().cstv);
-	else CoreLog("CS:TV: not loaded (it comes in through cstv/cstv-launch in the launch options)");
+	else CoreLog("CS:TV: not loaded (cstv/client/libcstv.so isn't in the launch options' LD_PRELOAD)");
 }
 
 // triggerlook (the trigger menu, triggerlook_menu) is its own library: triggerlook.so next to bhoptools.so. It needs
@@ -653,6 +685,9 @@ static void InstallCodeHooks()
 	InstallDownloadProgress();
 	InstallClientHooks();
 	InstallFastdl();
+	// the lump checksums and the update check, also when fastdl's signatures broke (then a fixed release may be out)
+	CurlGlobalInit();
+	StartDetached(StartupFetchThread, nullptr);
 	RemoveFrametimeFloor();
 	glyphs::Install();
 	speedo::RegisterCommands();

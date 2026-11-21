@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <string>
 
 namespace options {
@@ -18,5 +19,9 @@ void SetKeys(const std::string& text, float x, float y);
 void ClearKeys();
 // The overlay's hook is in, so the client can say it draws its own showkeys (kClientJumpstats12)
 bool KeysOverlay();
+
+// GitHub's JSON for APP_REPO's latest release (any thread): when its tag is newer than APP_VERSION the tab says
+// "Update available", with a link to the releases page. Only a notice: nothing is downloaded or installed.
+void ReadLatestRelease(FILE* json);
 
 }

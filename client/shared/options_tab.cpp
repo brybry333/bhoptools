@@ -4,8 +4,13 @@
 #include "sigs.h"
 #include "utils.h"
 #include "game_layout.h"
+#include "version.h"
+#include "update_check.h"
 
+#include <atomic>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <vector>
@@ -13,6 +18,9 @@
 // paint's p2paint_server(): 1 = this server runs the paint plugin, 0 = it doesn't, -1 = can't tell / no paint
 // (linux/preload.cpp, windows/main.cpp)
 int PaintServerState();
+// opens a web page in the player's browser, off the game thread's way; url = a constant (it's read later on another
+// thread) (linux/preload.cpp, windows/main.cpp)
+void OpenUrl(const char* url);
 
 namespace options {
 namespace {
@@ -42,6 +50,7 @@ typedef const char* (*GetNameFn)(void*, VPANEL);
 typedef void   (*GetSizeFn)(void*, VPANEL, int&, int&);
 typedef void   (*GetTextPosFn)(void*, int&, int&);
 
+const int FONTFLAG_ITALIC = 0x001;
 const int FONTFLAG_ANTIALIAS = 0x010;
 const int FONTFLAG_OUTLINE = 0x200;
 #ifdef _WIN32
@@ -84,10 +93,17 @@ void** g_sheetVt;
 PanelFn        oPaint;
 PanelFn        oSheetLayout;
 MousePressedFn oMousePressed;
-HFont  g_font;
+HFont  g_font, g_italic;
 double g_lastPaint = -1.0;
 VPANEL g_page;
 std::vector<VPANEL> g_hidden;
+
+// A GitHub release newer than this build: its tag, written once by ReadLatestRelease's thread before g_haveNewer.
+// g_checked: GitHub's latest release was read (without it the version line doesn't claim "up to date").
+char g_newer[32];
+std::atomic<bool> g_haveNewer, g_checked;
+const char kReleasesPage[] = "https://github.com/" APP_REPO "/releases/latest";
+int g_linkX0, g_linkY0, g_linkX1 = -1, g_linkY1 = -1;   // where the link was drawn (page coordinates)
 
 VPANEL VPanelOf(void* panel) { return VFunc<GetVPanelFn>(panel, VT_Panel_GetVPanel)(panel); }
 
@@ -106,13 +122,21 @@ void HideChildren(VPANEL page)
 	}
 }
 
-int RowAt(VPANEL page)
+// the mouse in page coordinates
+void CursorIn(VPANEL page, int& x, int& y)
 {
 	int cx = 0, cy = 0, px = 0, py = 0;
 	VFunc<GetCursorPosFn>(g_input, VT_IInput_GetCursorPos)(g_input, cx, cy);
 	VFunc<GetAbsPosFn>(g_panel, VT_IPanel_GetAbsPos)(g_panel, page, px, py);
-	const int x = cx - px;
-	const int y = cy - py - kTop;
+	x = cx - px;
+	y = cy - py;
+}
+
+int RowAt(VPANEL page)
+{
+	int x, y;
+	CursorIn(page, x, y);
+	y -= kTop;
 	if (x < kLeft || x > kLeft + kWidth || y < 0) return -1;
 	const int row = y / kRowTall;
 	return row < kRowCount && y % kRowTall < kRowTall - 8 ? row : -1;
@@ -139,6 +163,10 @@ void Draw(VPANEL page)
 		if (!g_font) g_font = VFunc<CreateFontFn>(g_surface, VT_Surface_CreateFont)(g_surface);
 		if (g_font) VFunc<SetFontGlyphSetFn>(g_surface, VT_Surface_SetFontGlyphSet)(
 			g_surface, g_font, kFace, 15, 500, 0, 0, FONTFLAG_ANTIALIAS, 0, 0);
+		if (!g_italic) g_italic = VFunc<CreateFontFn>(g_surface, VT_Surface_CreateFont)(g_surface);
+		// (italic on Windows only: the Linux font lookup matches the family alone, so it stays upright there)
+		if (g_italic) VFunc<SetFontGlyphSetFn>(g_surface, VT_Surface_SetFontGlyphSet)(
+			g_surface, g_italic, kFace, 14, 400, 0, 0, FONTFLAG_ANTIALIAS | FONTFLAG_ITALIC, 0, 0);
 	}
 	g_lastPaint = now;
 	if (!g_font) return;
@@ -156,6 +184,29 @@ void Draw(VPANEL page)
 			Text(kLeft + kBox + 10, y, t.c_str(), 120, 120, 120);
 		} else
 			Text(kLeft + kBox + 10, y, kRows[i].name, 235, 235, 235);
+	}
+
+	// Under the rows: "Update available (v1.2.3): check the GitHub", the last word a link (its end = where the text
+	// pos got to); else this build's version in faint italics
+	g_linkX1 = -1;
+	const int y = kTop + kRowCount * kRowTall + 8;
+	if (!g_haveNewer.load(std::memory_order_acquire)) {
+		if (!g_italic) return;
+		VFunc<SetTextFontFn>(g_surface, VT_Surface_DrawSetTextFont)(g_surface, g_italic);
+		Text(kLeft, y, g_checked.load() ? L"bhoptools - brylin's fork " APP_VERSION L" - up to date"
+			: L"bhoptools - brylin's fork " APP_VERSION, 130, 130, 130);
+	} else {
+		std::wstring line = L"Update available (";
+		for (const char* c = g_newer; *c; ++c) line += (wchar_t)*c;
+		line += L"): check the ";
+		Text(kLeft, y, line.c_str(), 235, 235, 235);
+		int x0 = 0, x1 = 0, ty = 0;
+		VFunc<GetTextPosFn>(g_surface, VT_Surface_DrawGetTextPos)(g_surface, x0, ty);
+		Text(x0, y, L"GitHub", 90, 165, 255);
+		VFunc<GetTextPosFn>(g_surface, VT_Surface_DrawGetTextPos)(g_surface, x1, ty);
+		Rect(VT_Surface_DrawFilledRect, x0, y + 16, x1, y + 17, 90, 165, 255, 255);
+		g_linkX0 = x0; g_linkX1 = x1;
+		g_linkY0 = y; g_linkY1 = y + 18;
 	}
 }
 
@@ -274,7 +325,8 @@ void InstallOverlay()
 
 void Hooked_MousePressed(void* self, int code)
 {
-	const int row = RowAt(VPanelOf(self));
+	const VPANEL page = VPanelOf(self);
+	const int row = RowAt(page);
 	Settings& s = settings::Get();
 	if (row >= 0) {
 		bool& v = s.*kRows[row].value;
@@ -282,6 +334,9 @@ void Hooked_MousePressed(void* self, int code)
 		if (kRows[row].also) s.*kRows[row].also = v;
 		settings::Changed();
 	}
+	int x, y;
+	CursorIn(page, x, y);
+	if (x >= g_linkX0 && x < g_linkX1 && y >= g_linkY0 && y < g_linkY1) OpenUrl(kReleasesPage);
 	oMousePressed(self, code);
 }
 
@@ -361,6 +416,21 @@ void ClearKeys()
 bool KeysOverlay()
 {
 	return g_panelVt != nullptr;
+}
+
+void ReadLatestRelease(FILE* json)
+{
+	// "tag_name" comes before the release notes, near the top
+	static char buf[16384];
+	const size_t n = fread(buf, 1, sizeof(buf) - 1, json);
+	buf[n] = 0;
+	char tag[sizeof(g_newer)];
+	if (g_haveNewer.load() || !ParseReleaseTag(buf, tag)) return;
+	g_checked.store(true);
+	if (!NewerVersion(tag, APP_VERSION)) return;
+	memcpy(g_newer, tag, strlen(tag) + 1);
+	g_haveNewer.store(true, std::memory_order_release);
+	CoreLog("bhoptools %s is out (this is " APP_VERSION "): %s", tag, kReleasesPage);
 }
 
 #ifdef _WIN32

@@ -9,6 +9,7 @@
 native int SuperLandfix_GetMethod(int client);
 
 ConVar gCV_StaticPrestrafe;
+bool gB_HaveNoclipCmd;    // shavit-misc's sm_nc exists (checked each second: a command search is too slow per usercmd)
 bool gB_SuperLandfix;
 
 // gI_SentLandfix -1 sends bhoptools_move again.
@@ -26,7 +27,7 @@ float Runspeed(int client)
 		gCV_StaticPrestrafe = FindConVar("shavit_misc_staticprestrafe");
 	}
 
-	if (gCV_StaticPrestrafe == null || !gCV_StaticPrestrafe.BoolValue || !CommandExists("sm_nc"))
+	if (gCV_StaticPrestrafe == null || !gCV_StaticPrestrafe.BoolValue || !gB_HaveNoclipCmd)
 	{
 		return 0.0;
 	}

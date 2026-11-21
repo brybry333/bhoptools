@@ -239,11 +239,13 @@ static bool PredReadLump(FILE* f, long fileSize, const BspHeader& h, int lump, s
 {
 	const BspLump& l = h.lumps[lump];
 	if (l.fileofs <= 0 || l.filelen <= 0) return false;
-	// Otherwise a bogus header has us zero-fill up to 2GB.
-	if ((int64_t)l.fileofs + l.filelen > fileSize) return false;
-	out.resize((size_t)l.filelen);
+	// Read no further than the file: a bogus header would have us zero-fill up to 2GB, and the engine plays maps
+	// whose last lump is cut short (bhop_bathhouse's entities are a byte short)
+	if ((int64_t)l.fileofs >= fileSize) return false;
+	const size_t len = (size_t)std::min<int64_t>(l.filelen, fileSize - l.fileofs);
+	out.resize(len);
 	if (fseek(f, l.fileofs, SEEK_SET) != 0) return false;
-	if (fread(out.data(), 1, (size_t)l.filelen, f) != (size_t)l.filelen) return false;
+	if (fread(out.data(), 1, len, f) != len) return false;
 	if (crc) *crc = PredCrc32(out.data(), out.size());
 	if (out.size() >= 17 && memcmp(out.data(), "LZMA", 4) == 0) {
 		std::vector<uint8_t> plain;
@@ -559,6 +561,9 @@ static bool PredLoadBsp(const char* path, PredMap& map, bool worldBrushes = fals
 			if (br.firstside < 0 || br.numsides <= 0 || (size_t)br.firstside + (size_t)br.numsides > sideCount)
 				continue;
 			if (m == 0 && !(br.contents & maskPlayerSolid)) continue;
+			// A crafted map can make every model reach every brush with every side (billions of planes): no prediction
+			// past 4M (real maps: under 70k)
+			if (map.brushPlanes.size() + (size_t)br.numsides > (4u << 20)) return false;
 			PredBrushSpan span = {};
 			span.firstPlane = (int)map.brushPlanes.size();
 			span.contents = br.contents;

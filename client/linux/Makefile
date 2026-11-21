@@ -11,7 +11,6 @@ CXXFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
 CXXFLAGS += -std=c++14 -fno-strict-aliasing -ffp-contract=off -fno-math-errno
 
 SO_NAME  := bhoptools.so
-EXE_NAME := bhoptools
 
 SO_FLAGS := -shared -fPIC -m64 \
             -fno-stack-protector \
@@ -22,12 +21,9 @@ SO_FLAGS := -shared -fPIC -m64 \
             -Wl,--version-script=preload.ver \
             -Wl,--no-as-needed -l:libdl.so.2 -l:libpthread.so.0
 
-EXE_FLAGS := -m64 \
-             -static-libstdc++ -static-libgcc
-
 .PHONY: all clean check-glibc sniper
 
-all: $(SO_NAME) $(EXE_NAME)
+all: $(SO_NAME)
 
 SRCS := preload.cpp glibc_compat.cpp chat_glyphs.cpp singleletter_fix.cpp \
         ../shared/teleport_predict.cpp ../shared/checkpoint_predict.cpp \
@@ -36,9 +32,6 @@ SRCS := preload.cpp glibc_compat.cpp chat_glyphs.cpp singleletter_fix.cpp \
 
 $(SO_NAME): $(SRCS) $(wildcard *.h ../shared/*.h) preload.ver
 	$(CXX) $(CXXFLAGS) -I. -I../shared -fPIC $(SRCS) -o $@ $(SO_FLAGS)
-
-$(EXE_NAME): launcher.cpp
-	$(CXX) $(CXXFLAGS) launcher.cpp -o $@ $(EXE_FLAGS)
 
 check-glibc: $(SO_NAME)
 	@v=$$(objdump -T $(SO_NAME) | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1); \
@@ -53,4 +46,4 @@ sniper:
 		sh -c '$(MAKE) clean && $(MAKE) CXX=g++-14 && $(MAKE) check-glibc'
 
 clean:
-	rm -f $(SO_NAME) $(EXE_NAME)
+	rm -f $(SO_NAME)

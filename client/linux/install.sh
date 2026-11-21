@@ -8,7 +8,8 @@ DEST=${BHOPTOOLS_DIR:-$HOME/.local/share/bhoptools}
 case $DEST in *" "*) echo "your folder has a space in it ($DEST): set BHOPTOOLS_DIR to one without"; exit 1;; esac
 
 mkdir -p "$DEST"
-[ "$SRC" = "$DEST" ] || cp -r "$SRC"/. "$DEST"/
+# --remove-destination: a running game (and cstvd) keep the old files instead of having them rewritten under them
+[ "$SRC" = "$DEST" ] || cp -r --remove-destination "$SRC"/. "$DEST"/
 echo "installed to $DEST"
 
 # CS:TV's screen materials and fonts: into every CS:S install found (custom folders are read at game start)
@@ -25,6 +26,7 @@ for steam in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com
 done
 
 # CS:TV's video helper runs outside Steam's runtime: a user service that starts when the game connects
+launch=%command%
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
 	units=$HOME/.config/systemd/user
 	mkdir -p "$units"
@@ -55,15 +57,18 @@ EOF
 	systemctl --user daemon-reload
 	systemctl --user enable --now cstvd.socket >/dev/null 2>&1 && echo "CS:TV helper: ready"
 else
-	echo "no systemd user services here: CS:TV videos need $DEST/cstv/cstv-launch in front of %command%"
+	echo "no systemd user services here: the launch line below starts CS:TV's video helper through cstv-launch"
+	launch="$DEST/cstv/cstv-launch %command%"
 fi
 
 missing=
 for p in mpv yt-dlp streamlink python3; do command -v $p >/dev/null 2>&1 || missing="$missing $p"; done
 [ -z "$missing" ] || echo "for CS:TV videos, install:$missing"
+libs=$(ldd "$DEST/cstv/helper/cstvd" 2>/dev/null | sed -n 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/p' | tr '\n' ' ')
+[ -z "$libs" ] || echo "CS:TV's video helper can't start here, missing: $libs(a newer mpv / libmpv is needed)"
 
 echo
 echo "Steam > Counter-Strike: Source > Properties > Launch Options, paste:"
 echo
-echo "  LD_PRELOAD=\"$DEST/bhoptools.so:$DEST/cstv/client/libcstv.so:\$LD_PRELOAD\" %command% -insecure"
+echo "  LD_PRELOAD=\"$DEST/bhoptools.so:$DEST/cstv/client/libcstv.so:\$LD_PRELOAD\" $launch -insecure"
 echo

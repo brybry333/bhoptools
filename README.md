@@ -21,7 +21,8 @@ Keys: CS:S Options → Keyboard, the bhoptools section at the top (only F8 = pre
 On/off switches: Options → bhoptools.
 
 ## What's different from daf's 1.14.1
-- no auto-updater: it never contacts GitHub; new versions only from this repo's Releases
+- no auto-updater: at game start (at most every 6 hours) it reads the latest release's version number from GitHub and
+  Options > bhoptools says "Update available" with a link to the Releases page; nothing is downloaded or installed
 - `bhoptools_hello` once per map instead of every 30 s (servers without the bhoptools plugin don't fill your console)
 - built in, each with a switch in Options → bhoptools:
   - [curtimefix](https://github.com/brybry333/curtimefix): smooth movement on old maps

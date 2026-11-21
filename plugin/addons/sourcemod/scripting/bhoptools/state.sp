@@ -81,12 +81,18 @@ char gS_SentClass[MAXPLAYERS+1][64];
 // eventqueuefix waits for the command being sent, valid where the stamp matches.
 int gI_WaitStamp;
 int gI_SlotWaitStamp[MAX_SYNC];
+// Every slot read once per server frame (the same for every player): flags, value, door wait; gI_ReadFrame = gI_Frame
+// when they belong to this frame
+int gI_ReadFlags[MAX_SYNC];
+int gI_ReadValue[MAX_SYNC];
+int gI_ReadDoorWait[MAX_SYNC];
+int gI_Frame;
+int gI_ReadFrame = -1;
 int gI_SlotWait[MAX_SYNC];
 
 public void OnMapEnd()
 {
 	ResetSync();
-	Update_OnMapEnd();
 }
 
 void ResetSync()
@@ -269,6 +275,8 @@ public Action Command_Resync(int client, int args)
 // included, as the client's snapshot for its last command there is.
 public void OnGameFrame()
 {
+	gI_Frame++;
+
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (gB_StateRan[i] && IsClientInGame(i))
@@ -283,6 +291,17 @@ void SendState(int client, int cmdnum)
 	if (!gB_Predicting[client] || gI_Proto[client] < 2 || !(gI_ClientFlags[client] & CLIENT_STATE))
 	{
 		return;
+	}
+
+	if (gI_ReadFrame != gI_Frame)
+	{
+		gI_ReadFrame = gI_Frame;
+
+		for (int slot = 0; slot < gI_Synced; slot++)
+		{
+			gI_ReadFlags[slot] = ReadEntity(slot, gI_ReadValue[slot]);
+			gI_ReadDoorWait[slot] = (gI_SyncKind[slot] == SYNC_DOOR && !(gI_ReadFlags[slot] & ENT_REMOVED)) ? DoorWait(slot, gI_ReadFlags[slot]) : -1;
+		}
 	}
 
 	int session = gI_Session[client];
@@ -312,17 +331,17 @@ void SendState(int client, int cmdnum)
 
 	for (int slot = 0; slot < gI_Synced; slot++)
 	{
-		int value;
-		int flags = ReadEntity(slot, value);
+		int value = gI_ReadValue[slot];
+		int flags = gI_ReadFlags[slot];
 		int wait = -1;
 
 		if (gI_SyncKind[slot] == SYNC_MULTIPLE && waits && !(flags & ENT_REMOVED))
 		{
 			wait = (gI_SlotWaitStamp[slot] == gI_WaitStamp) ? gI_SlotWait[slot] : 0;
 		}
-		else if (gI_SyncKind[slot] == SYNC_DOOR && !(flags & ENT_REMOVED))
+		else if (gI_SyncKind[slot] == SYNC_DOOR)
 		{
-			wait = DoorWait(slot, flags);
+			wait = gI_ReadDoorWait[slot];
 		}
 
 		// A wait counts down with every command, so compare the command it ends on. A door's wait only

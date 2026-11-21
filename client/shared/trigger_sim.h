@@ -373,11 +373,17 @@ static std::string PredLower(const char* s)
 struct PredNameIndex {
 	const PredMap* map = nullptr;
 	std::unordered_map<std::string, std::vector<int>> exact;
+	// Entities compared by "name*" and classname lookups: a crafted map's thousands of them times thousands of entities
+	// would take minutes at load, so past the budget a lookup finds nothing (real maps: far below it)
+	mutable long long scanned = 0;
+	static const long long kScanBudget = 20000000;
+	bool Scan() const { return (scanned += (long long)map->entities.size()) <= kScanBudget; }
 
 	void Build(const PredMap& m)
 	{
 		map = &m;
 		exact.clear();
+		scanned = 0;
 		for (int i = 0; i < (int)m.entities.size(); ++i) {
 			const char* n = m.entities[i].Get("targetname");
 			if (n[0]) exact[PredLower(n)].push_back(i);
@@ -394,6 +400,7 @@ struct PredNameIndex {
 			if (it != exact.end()) out = it->second;
 			return;
 		}
+		if (!Scan()) return;
 		for (int i = 0; i < (int)map->entities.size(); ++i) {
 			const char* name = map->entities[i].Get("targetname");
 			if (name[0] && PredWildcardMatch(query, name)) out.push_back(i);
@@ -483,7 +490,8 @@ static void PredBuildGrid(PredMap& map)
 		bool finite = true;
 		for (int c = 0; c < 2; ++c) {
 			mins[c] -= 1.0f; maxs[c] += 1.0f;
-			finite = finite && std::isfinite(mins[c]) && std::isfinite(maxs[c]) && fabsf(mins[c]) < 1e6f && fabsf(maxs[c]) < 1e6f;
+			// (past +-65536 = far beyond the playable +-16384: unbinned, or two far triggers make a huge grid)
+			finite = finite && std::isfinite(mins[c]) && std::isfinite(maxs[c]) && fabsf(mins[c]) < 65536.0f && fabsf(maxs[c]) < 65536.0f;
 		}
 		if (!finite) { g.always.push_back(i); continue; }
 		trig.push_back(i);
@@ -548,7 +556,7 @@ static void PredScriptTargets(const PredMap& map, const PredNameIndex& names, in
 	if (!strcasecmp(target.c_str(), "!self") || !strcasecmp(target.c_str(), "!caller")) { out.push_back(self); return; }
 	if (target.empty() || target[0] == '!') return;
 	names.Find(target.c_str(), out);
-	if (!out.empty()) return;
+	if (!out.empty() || !names.Scan()) return;
 	for (int i = 0; i < (int)map.entities.size(); ++i)
 		if (PredWildcardMatch(target.c_str(), map.entities[i].Get("classname"))) out.push_back(i);
 }
@@ -567,6 +575,10 @@ static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScrip
 		return idx.entScope[ent];
 	};
 
+	// Source compiled, per logic_script and for the whole map: a crafted map can make thousands of logic_scripts
+	// compile the same big file (GBs, minutes); past either budget a scope is unknown (real maps: a few KB)
+	const size_t kMapScriptBytes = 1u << 20;
+	size_t mapBytes = 0;
 	std::vector<std::string> files;
 	for (int i = 0; i < (int)map.entities.size(); ++i) {
 		const PredMapEntity& e = map.entities[i];
@@ -575,6 +587,7 @@ static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScrip
 		if (!logicScript) { if (e.Get("vscripts")[0]) idx.entScope[i] = -2; continue; }
 		vs::Program& prog = map.vsPrograms[newProgram(i)];
 		PredSplitVScripts(e.Get("vscripts"), files);
+		size_t progBytes = 0;
 		for (const std::string& name : files) {
 			if (name.empty()) continue;
 			const PredScriptFile* sf = nullptr;
@@ -582,7 +595,12 @@ static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScrip
 				if (f.name == name) { sf = &f; break; }
 			if (!sf)                                            prog.MakeDynamic("script not loaded");
 			else if (sf->state == PredScriptFile::UNREADABLE) prog.MakeDynamic("unreadable script");
-			else if (sf->state == PredScriptFile::LOADED)     vs::CompileFile(prog, sf->text.c_str(), sf->text.size());
+			else if (sf->state == PredScriptFile::LOADED) {
+				if ((progBytes += sf->text.size()) > vs::kMaxSource || (mapBytes += sf->text.size()) > kMapScriptBytes)
+					prog.MakeDynamic("too much script");
+				else
+					vs::CompileFile(prog, sf->text.c_str(), sf->text.size());
+			}
 		}
 	}
 

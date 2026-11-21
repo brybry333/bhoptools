@@ -104,8 +104,10 @@ public:
 					if (pl.normal[c] == -1.0f) { bx.mins[c] = -pl.dist; found |= 2 << (c * 2); }
 				}
 			}
-			bx.bounded = found == 0x3f && std::isfinite(bx.mins[0]) && std::isfinite(bx.maxs[0])
-				&& std::isfinite(bx.mins[1]) && std::isfinite(bx.maxs[1]);
+			// (a map can put a side at 1e12: past +-65536, far beyond the playable +-16384, it stays out of the grid,
+			// whose cell count would overflow)
+			bx.bounded = found == 0x3f && fabsf(bx.mins[0]) < 65536.0f && fabsf(bx.maxs[0]) < 65536.0f
+				&& fabsf(bx.mins[1]) < 65536.0f && fabsf(bx.maxs[1]) < 65536.0f;
 			if (bx.bounded) {
 				lo[0] = fminf(lo[0], bx.mins[0]); lo[1] = fminf(lo[1], bx.mins[1]);
 				hi[0] = fmaxf(hi[0], bx.maxs[0]); hi[1] = fmaxf(hi[1], bx.maxs[1]);

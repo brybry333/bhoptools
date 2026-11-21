@@ -5,6 +5,7 @@
 #define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <windows.h>
 #include <tlhelp32.h>
 #include <cwchar>
@@ -64,11 +65,15 @@ intptr_t plat_connect()
     }
     SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
     if (s == INVALID_SOCKET) return -1;
+    // A refused connect fails at once: Windows otherwise retries the SYN for ~2 s, here on the game's thread
+    TCP_INITIAL_RTO_PARAMETERS rto = {TCP_INITIAL_RTO_UNSPECIFIED_RTT, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS};
+    DWORD got;
+    WSAIoctl(s, SIO_TCP_INITIAL_RTO, &rto, sizeof rto, nullptr, 0, &got, nullptr, nullptr);
     sockaddr_in a = {};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = htons(CSTV_TCP_PORT);
-    if (connect(s, (sockaddr *)&a, sizeof a)) { closesocket(s); return -1; }   // refused at once if cstvd isn't there
+    if (connect(s, (sockaddr *)&a, sizeof a)) { closesocket(s); return -1; }
     u_long nb = 1;
     ioctlsocket(s, FIONBIO, &nb);   // like MSG_DONTWAIT on Linux: never stall the game's frame
     BOOL nodelay = TRUE;
@@ -162,7 +167,6 @@ void plat_spawn_helper()
         CloseHandle(g_spawned);
         g_spawned = nullptr;
     }
-    if (cstvd_running()) return;
     g_last_spawn = now;
     HMODULE self = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -176,6 +180,7 @@ void plat_spawn_helper()
     if (swprintf(cwd, MAX_PATH, L"%ls\\cstv", dir) < 0 || swprintf(exe, MAX_PATH, L"%ls\\cstvd.exe", cwd) < 0
         || swprintf(cmd, MAX_PATH + 2, L"\"%ls\"", exe) < 0) return;
     if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) return;
+    if (cstvd_running()) return;   // (a process snapshot, slow: only once the helper is there at all)
     SetEnvironmentVariableW(L"CSTV_QUIT_WITHOUT_GAME", L"1");   // it quits 15 s after the game has gone
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof si);
@@ -431,6 +436,19 @@ void plat_input_window(bool open)
         RAWINPUTDEVICE d = {1, 2, 0, g_hwnd};
         RegisterRawInputDevices(&d, 1, sizeof d);
     }
+}
+
+// bhoptools' high polling rate fix reads the raw mouse queue itself (GetRawInputBuffer before the game's
+// messages are dispatched), so most WM_INPUT never reaches game_wndproc. bhoptools hands each report's
+// motion here first (game thread): true = the window took it, keep it from the view.
+extern "C" __declspec(dllexport) bool cstv_raw_motion(int dx, int dy)
+{
+    if (!g_capture || !g_event_fn || !(dx || dy)) return false;
+    plat_event e = {};
+    e.type = PLAT_MOTION;
+    e.dx = dx;
+    e.dy = dy;
+    return !g_event_fn(&e);
 }
 
 char *plat_clipboard_get()

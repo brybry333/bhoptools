@@ -44,12 +44,14 @@ jobs:
       - name: Check glibc
         run: make -C client/linux check-glibc
 
+      - name: Checks
+        run: g++ -std=c++14 -Iclient/shared client/tests/checks.cpp -o checks && ./checks
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-linux-x64
           path: |
             client/linux/bhoptools.so
-            client/linux/bhoptools
           if-no-files-found: error
 
   build-plugin:

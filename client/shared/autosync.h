@@ -131,8 +131,9 @@ struct AsTracker {
 		const Run& prev = runs[(cmd - 1) & (kRuns - 1)];
 		if (prev.cmd == cmd - 1 && prev.seq == r.seq) return prev.after;
 		AsState st = { { 0, 0, 0 }, 0, false };
-		const int from = cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd + 1;
-		if (from == r.cmd + 1 && ri > 0) {
+		// (64-bit, and no later than cmd: a server's report can name any command number)
+		const int from = (long long)cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd < cmd ? r.cmd + 1 : cmd;
+		if (r.cmd < cmd && from == r.cmd + 1 && ri > 0) {
 			st = StateBefore(ri - 1, from);
 		} else {
 			for (int c = from - 1; c > cmd - kRuns; --c) {
@@ -155,7 +156,7 @@ struct AsTracker {
 	int TeleTicks(const Report& r, int cmd) const
 	{
 		int zero = r.zero;
-		for (int c = cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd + 1; c <= cmd; ++c) {
+		for (int c = (long long)cmd - r.cmd > kRuns ? cmd - kRuns + 1 : r.cmd < cmd ? r.cmd + 1 : cmd; c <= cmd; ++c) {
 			const Run& run = runs[c & (kRuns - 1)];
 			if (run.cmd == c && run.zero > zero) zero = run.zero;
 		}
