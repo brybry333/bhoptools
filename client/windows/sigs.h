@@ -144,6 +144,7 @@ static const int VT_Surface_DrawPrintText    = 22; // (const wchar_t*, int len, 
 static const int VT_Surface_IsCursorVisible  = 53;
 static const int VT_Surface_CreateFont       = 66;
 static const int VT_Surface_SetFontGlyphSet  = 67; // (HFont, name, tall, weight, blur, scanlines, flags, rangeMin, rangeMax)
+static const int VT_Surface_GetFontTall      = 69; // (HFont): no overload from CreateFont on, so the same slot as Linux
 static const char RTTI_OptionsSubMultiplayer[] = ".?AVCOptionsSubMultiplayer@@";
 static const char RTTI_PropertySheet[]         = ".?AVPropertySheet@vgui@@";
 

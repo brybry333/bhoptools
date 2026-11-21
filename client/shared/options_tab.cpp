@@ -45,6 +45,7 @@ typedef void   (*SetTextFontFn)(void*, HFont);
 typedef void   (*PrintTextFn)(void*, const wchar_t*, int, int);
 typedef HFont  (*CreateFontFn)(void*);
 typedef bool   (*SetFontGlyphSetFn)(void*, HFont, const char*, int, int, int, int, int, int, int);
+typedef int    (*GetFontTallFn)(void*, HFont);
 typedef void   (*PaintTraverseFn)(void*, VPANEL, bool, bool);
 typedef const char* (*GetNameFn)(void*, VPANEL);
 typedef void   (*GetSizeFn)(void*, VPANEL, int&, int&);
@@ -155,11 +156,24 @@ void Rect(int op, int x0, int y0, int x1, int y1, int r, int g, int b, int a)
 	VFunc<Int4Fn>(g_surface, op)(g_surface, x0, y0, x1, y1);
 }
 
+// A video mode change clears every font: the handle stays, its glyphs are gone (tall 0). Options' Apply sets the mode
+// again even when nothing in it changed (the screen goes black for a moment), with this page still open. True at most
+// twice a second, so a face that can't be loaded isn't looked up every frame.
+bool FontDropped(HFont f, double& lastTry)
+{
+	if (!f || VFunc<GetFontTallFn>(g_surface, VT_Surface_GetFontTall)(g_surface, f) > 0) return false;
+	const double now = MonotonicSeconds();
+	if (now - lastTry < 0.5) return false;
+	lastTry = now;
+	return true;
+}
+
 void Draw(VPANEL page)
 {
-	// A video mode change drops every font, so load it again each time the page opens.
+	// Load the fonts each time the page opens, and again when a video mode change dropped them
+	static double s_fontTry;
 	const double now = MonotonicSeconds();
-	if (now - g_lastPaint > 1.0) {
+	if (now - g_lastPaint > 1.0 || FontDropped(g_font, s_fontTry) || FontDropped(g_italic, s_fontTry)) {
 		if (!g_font) g_font = VFunc<CreateFontFn>(g_surface, VT_Surface_CreateFont)(g_surface);
 		if (g_font) VFunc<SetFontGlyphSetFn>(g_surface, VT_Surface_SetFontGlyphSet)(
 			g_surface, g_font, kFace, 15, 500, 0, 0, FONTFLAG_ANTIALIAS, 0, 0);
@@ -274,8 +288,9 @@ void DrawKeys(VPANEL overlay)
 	const int tall = h < 1200 ? 24 : h * 24 / 1080;
 	if (!g_keysFont) g_keysFont = VFunc<CreateFontFn>(g_surface, VT_Surface_CreateFont)(g_surface);
 	if (!g_keysFont) return;
-	// A video mode change drops the font's glyphs; it also changes the screen size, so set them again then
-	if (tall != g_keysTall || w != g_keysScreenW || h != g_keysScreenH) {
+	// Set the glyphs again for a new screen size, and when a video mode change dropped them (also at the same size)
+	static double s_fontTry;
+	if (tall != g_keysTall || w != g_keysScreenW || h != g_keysScreenH || FontDropped(g_keysFont, s_fontTry)) {
 		VFunc<SetFontGlyphSetFn>(g_surface, VT_Surface_SetFontGlyphSet)(
 			g_surface, g_keysFont, kKeysFace, tall, 900, 0, 0, FONTFLAG_ANTIALIAS | FONTFLAG_ADDITIVE, 0, 0);
 		g_keysTall = tall;
