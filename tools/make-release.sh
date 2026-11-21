@@ -29,6 +29,7 @@ python3 "$R/client/windows/pack.py" "$OUT/bhoptools.exe" "$D/windows"
 
 L=$OUT/linux/bhoptools
 cp "$D/linux/"{bhoptools.so,libcurtimefix.so,triggerlook.so,p2paint.so} "$L/"
+strip --strip-debug "$L"/*.so   # debug info holds the build folder's path
 cp -r "$D/linux/cstv" "$L/"
 find "$L" -name '*.bak*' -delete   # local backups in dist/ stay local
 cp "$R/client/linux/install.sh" "$L/"
