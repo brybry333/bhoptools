@@ -11,6 +11,7 @@ rm -rf "$R/cstv" "$R/LICENSES/cstv"
 mkdir -p "$R/cstv/fonts" "$R/LICENSES/cstv"
 
 cp "$OUT/cstv_client.dll" "$R/"
+cp "$C/mcassets.py" "$R/"   # packed into bhoptools.exe (pack.py), run by it with the Python below
 cp "$OUT/cstvd.exe" "$OUT/cstv_ytdl.exe" "$C"/helper/{cstv_overlay.py,cstv_ytdl.py,cstv_link.py} "$R/cstv/"
 cp "$C/win/build/mpv-dev/libmpv-2.dll" "$D/yt-dlp.exe" "$R/cstv/"
 unzip -q -o "$D/deno.zip" -d "$R/cstv/"

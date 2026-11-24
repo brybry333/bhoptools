@@ -22,6 +22,10 @@ for steam in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com
 		mkdir -p "$game/custom/cstv"
 		cp -r "$DEST/cstv/assets/materials" "$DEST/cstv/assets/resource" "$game/custom/cstv/"
 		echo "CS:TV files -> $game/custom/cstv"
+		# the Progress Log's Minecraft book: from a Minecraft install here, else Mojang's download server (Mojang's
+		# files never ship with bhoptools); nothing to do when they're there already
+		rm -f "$game/custom/cstv/resource/cstv/.mcassets-tried"
+		python3 -I "$DEST/cstv/mcassets.py" --auto --out "$game/custom/cstv" 2>&1 | sed 's/^/  Progress Log book: /' || true
 	done
 done
 

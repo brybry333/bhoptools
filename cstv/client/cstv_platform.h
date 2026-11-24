@@ -30,6 +30,23 @@ void plat_spawn_helper();                                   // cstvd isn't answe
 bool plat_thread(void *(*fn)(void *));
 void plat_sleep_ms(int ms);
 
+// this player's own files (the Progress Log's log): $XDG_DATA_HOME/cstv or ~/.local/share/cstv, %APPDATA%\cstv;
+// made when missing. No trailing slash; "" when there's no home folder.
+const char *plat_data_dir();
+bool plat_mkdir(const char *path);                          // one folder; true when it's there afterwards
+bool plat_rename(const char *from, const char *to);         // replacing `to`
+// https GET, blocking (call it on a thread): the body (malloc'd, *len bytes, 0-terminated) when the answer is 200,
+// else null; *status = the HTTP status, 0 when there was no answer
+void plat_http_init();                                      // once, on the main thread, before any plat_http_get
+char *plat_http_get(const char *url, size_t *len, int *status);
+// an exported function of another module in the game (p2paint, loaded by bhoptools), or null while it isn't there
+#ifdef _WIN32
+#define PLAT_P2PAINT "p2paint.dll"
+#else
+#define PLAT_P2PAINT "p2paint.so"
+#endif
+void *plat_module_symbol(const char *file, const char *symbol);
+
 #ifdef _WIN32
 // The game's window is plain Win32 on Windows (SDL only handles controllers there), so its messages are
 // translated into these. Return 0 from the callback to keep a message from the game.

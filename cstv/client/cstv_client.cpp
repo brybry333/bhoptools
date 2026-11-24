@@ -220,6 +220,15 @@ static cstv_shm *g_shm;
 static std::string g_ident_sent, g_where_sent;   // what cstvd was last told (resent after reconnecting)
 static void helper_drop();
 
+// the paint mod's hooks (see paint_tick)
+typedef void (*paint_frame_t)(int (*send)(const char *), int epoch);
+typedef void (*paint_line_t)(const char *);
+static paint_frame_t g_paint_frame;
+static paint_line_t g_paint_line;
+static double g_paint_look = -100;
+static bool g_hub_link;   // cstvd is connected to cstv.xyz
+static int g_hub_epoch;   // +1 each time that comes up: the paint mod says hello again
+
 static bool helper_send(const char *fmt, ...)
 {
     if (g_sock < 0) return false;
@@ -299,6 +308,7 @@ static int g_last_vol = -1;
 // every way the connection ends (send failed, cstvd closed it, CS:TV off)
 static void helper_drop()
 {
+    g_hub_link = false;
     if (g_sock >= 0) plat_close(g_sock);
     g_sock = -1;
     g_playing_sent = false;   // after reconnecting, send the link + aged position again
@@ -437,6 +447,29 @@ static void on_master(const char *line)
 }
 
 // Lines from cstvd (non-blocking).
+// ---------------------------------------------------------------- the paint mod (p2paint)
+// The bhoptools fork's paint mod keeps everyone's paint on their own PC and shares it with the other mod users on the
+// same server through cstv.xyz: its lines go out from here as `m paint ...` (cstvd passes them to the hub) and the
+// hub's `paint ...` lines come back as `srv paint ...`. It gets its per-frame tick from here too (it has none of its
+// own until its menu exists). Found by its exports, looked for every 2 s until it's there.
+
+static int paint_send(const char *line)
+{
+    if (!g_hub_link || !line || strlen(line) > 3000) return 0;
+    return helper_send("m %s\n", line) ? 1 : 0;
+}
+
+static void paint_tick()
+{
+    double now = now_s();
+    if (!g_paint_frame && now - g_paint_look > 2) {
+        g_paint_look = now;
+        g_paint_line = (paint_line_t)plat_module_symbol(PLAT_P2PAINT, "p2paint_hub_line");
+        g_paint_frame = g_paint_line ? (paint_frame_t)plat_module_symbol(PLAT_P2PAINT, "p2paint_frame") : nullptr;
+    }
+    if (g_paint_frame) g_paint_frame(paint_send, g_hub_link && g_sock >= 0 ? g_hub_epoch : 0);
+}
+
 static void helper_poll()
 {
     if (g_sock < 0) return;
@@ -456,6 +489,10 @@ static void helper_poll()
         std::string line = g_from_helper.substr(0, nl);
         g_from_helper.erase(0, nl + 1);
         int v;
+        if (!line.compare(0, 10, "srv paint ")) {   // the paint mod's, from the hub
+            if (g_paint_line) g_paint_line(line.c_str() + 4);
+            continue;
+        }
         if (!line.compare(0, 4, "srv ")) {
             on_master(line.c_str() + 4);
         } else if (!line.compare(0, 8, "pscreen ")) {   // pscreen <server>/<map> <geometry|none>
@@ -471,6 +508,8 @@ static void helper_poll()
             g_last_bind_check = 0;   // show / hide the panel right away
         } else if (sscanf(line.c_str(), "master %d", &v) == 1) {
             say(v ? "connected to cstv.xyz" : "no connection to cstv.xyz");
+            if (v && !g_hub_link) g_hub_epoch++;
+            g_hub_link = v != 0;
         } else if (sscanf(line.c_str(), "capture %d", &v) == 1) {
             if (v) capture_start();
             else capture_stop();
@@ -555,9 +594,11 @@ static void update_where()
 // bWantsToChat = 0 prints it through the HUD chat's Printf (no Steam text filter on it).
 enum { USERMSG_SAYTEXT = 3 };
 
-void cstv_print(const char *text)
+void cstv_print(const char *text) { cstv_chat_line((std::string(" \x04[CS:TV]\x01 ") + text).c_str()); }
+
+void cstv_chat_line(const char *line)
 {
-    std::string s = std::string(" \x04[CS:TV]\x01 ") + text;
+    std::string s = line, text = line;
     if (s.size() > 250) s.resize(250);
     for (auto &c : s)
         if (c == '\n' || c == '\r') c = ' ';
@@ -1329,7 +1370,7 @@ static bool chat_command(std::string text)
 // `cstv <command>` in the console instead.
 static void say_cb(const CCommand &args)
 {
-    if (!chat_command(args.ArgS())) g_engine->ServerCmd(args.GetCommandString(), true);
+    if (!pl_chat(args.ArgS()) && !chat_command(args.ArgS())) g_engine->ServerCmd(args.GetCommandString(), true);
 }
 
 static void cstv_cb(const CCommand &args)
@@ -1390,7 +1431,10 @@ static ClientCmdU_t o_ClientCmdU;
 
 static void h_ClientCmdU(IVEngineClient *self, const char *cmd)
 {
-    if (cmd && (!strncmp(cmd, "say ", 4) || !strncmp(cmd, "say_team ", 9)) && chat_command(cmd + (cmd[3] == ' ' ? 4 : 9))) return;
+    if (cmd && (!strncmp(cmd, "say ", 4) || !strncmp(cmd, "say_team ", 9))) {
+        const char *text = cmd + (cmd[3] == ' ' ? 4 : 9);
+        if (pl_chat(text) || chat_command(text)) return;   // the Progress Log's, then CS:TV's
+    }
     o_ClientCmdU(self, cmd);
 }
 
@@ -1410,6 +1454,17 @@ static void book_cb(const CCommand &) { gui_prog_toggle(); }
 static ConCommand g_cmd_book("cstv_book", book_cb, "Open or close the Progress Log");
 static ConCommand g_cmd_prog("prog_ui", prog_cb, "Progress Log window (the server's progresslog plugin drives it; !prog)", FCVAR_SERVER_CAN_EXECUTE);
 static ConCommand g_cmd_prog_test("prog_ui_test", prog_test_cb, "Progress Log: prog_ui plus the testing verbs (tab, pick, mouse, focus, ask, noask, key, graph)");
+// the plugin's command names, now on this client: binds made for the plugin (bind x sm_progsave) keep working
+static void sm_prog_cb(const CCommand &args) { pl_console("prog", args.ArgS()); }
+static void sm_progsave_cb(const CCommand &) { pl_console("progsave", ""); }
+static void sm_progmenu_cb(const CCommand &) { pl_console("progmenu", ""); }
+static void prog_debug_cb(const CCommand &) { pl_debug(); }
+static void prog_zones_cb(const CCommand &) { pl_refetch_zones(); }
+static ConCommand g_cmd_sm_prog("sm_prog", sm_prog_cb, "Progress Log: the book, or sm_prog <from> to <to> logs an attempt");
+static ConCommand g_cmd_sm_progsave("sm_progsave", sm_progsave_cb, "Progress Log: log the attempt you just played (bind it)");
+static ConCommand g_cmd_sm_progmenu("sm_progmenu", sm_progmenu_cb, "Progress Log: the book");
+static ConCommand g_cmd_prog_debug("prog_debug", prog_debug_cb, "Progress Log: what the run tracking sees (zones, position, the run)");
+static ConCommand g_cmd_prog_zones("prog_zones", prog_zones_cb, "Progress Log: download this map's timer zones again");
 static ConCommandBase *g_say_orig[2];   // server.so's say / say_team
 static ConCommand *const g_say_ours[2] = {&g_cmd_say, &g_cmd_say_team};
 static bool g_cmds_done, g_say_is_ours;
@@ -1422,6 +1477,7 @@ static void register_commands()
     g_cvar->RegisterConCommand(&g_cmd_book);
     g_cvar->RegisterConCommand(&g_cmd_prog);
     g_cvar->RegisterConCommand(&g_cmd_prog_test);
+    for (ConCommand *c : {&g_cmd_sm_prog, &g_cmd_sm_progsave, &g_cmd_sm_progmenu, &g_cmd_prog_debug, &g_cmd_prog_zones}) g_cvar->RegisterConCommand(c);
     for (int i = 0; i < 2; i++) {
         ConCommandBase *c = g_cvar->FindCommandBase(g_say_ours[i]->GetName());
         if (c && !c->IsCommand()) continue;
@@ -1584,6 +1640,7 @@ static SceneEnd_t o_SceneEnd;
 static void h_LevelInitPostEntity(IBaseClientDLL *self)
 {
     o_LevelInitPostEntity(self);
+    pl_level_init();
     ensure_texture();
     if (!g_screen_mat) g_screen_mat = find_material("cstv/screen");
     if (!g_chat_mat) g_chat_mat = find_material("cstv/chat");
@@ -1602,6 +1659,7 @@ static void h_LevelShutdown(IBaseClientDLL *self)
     g_place.on = false;
     g_place_wait = 0;
     gui_prog_level_end();
+    pl_level_end();
     g_where_sent.clear();   // even back on the same server + map: the master then sends the screen and link again
     o_LevelShutdown(self);
 }
@@ -1619,6 +1677,8 @@ static void h_FrameStageNotify(IBaseClientDLL *self, ClientFrameStage_t stage)
     if (stage == FRAME_START) capture_frame();
     if (stage == FRAME_RENDER_START) {
         render_tick();
+        pl_frame();   // the Progress Log's run tracking (CS:TV on or off)
+        paint_tick();   // the paint mod's tick and hub lines
     }
     o_FrameStageNotify(self, stage);
 }
@@ -1651,6 +1711,8 @@ static bool interfaces()
     g_render = (IVRenderView *)plat_interface("engine", VENGINE_RENDERVIEW_INTERFACE_VERSION);
     g_trace = (IEngineTrace *)plat_interface("engine", INTERFACEVERSION_ENGINETRACE_CLIENT);
     g_cvar = (ICvar *)plat_interface(PLAT_VSTDLIB, CVAR_INTERFACE_VERSION);
+    // the Progress Log's run tracking reads the local player (no entity list: the log still works, typed)
+    pl_setup(g_engine, g_client, (IClientEntityList *)plat_interface("client", "VClientEntityList003"));
     return g_client && g_matsys && g_engine && g_render && g_trace && g_cvar;
 }
 
@@ -1869,6 +1931,96 @@ bool plat_thread(void *(*fn)(void *))
 }
 
 void plat_sleep_ms(int ms) { usleep(ms * 1000); }
+
+const char *plat_data_dir()
+{
+    static std::string dir;
+    if (!dir.empty()) return dir.c_str();
+    const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
+    std::string base = x && *x == '/' ? x : h && *h ? std::string(h) + "/.local/share" : "";
+    if (base.empty()) return "";
+    std::string p;
+    for (size_t i = 1; i <= base.size(); i++)   // (~/.local/share may not exist yet)
+        if (i == base.size() || base[i] == '/') { p = base.substr(0, i); mkdir(p.c_str(), 0755); }
+    dir = base + "/cstv";
+    mkdir(dir.c_str(), 0755);
+    return dir.c_str();
+}
+
+bool plat_mkdir(const char *path) { return mkdir(path, 0755) == 0 || errno == EEXIST; }
+
+void *plat_module_symbol(const char *file, const char *symbol)
+{
+    std::string path = module_path((std::string("/") + file).c_str());   // (bhoptools loads it privately)
+    if (path.empty()) return nullptr;
+    void *h = dlopen(path.c_str(), RTLD_NOLOAD | RTLD_LAZY);
+    if (!h) return nullptr;
+    void *f = dlsym(h, symbol);
+    dlclose(h);   // (only the reference NOLOAD added: the module stays)
+    return f;
+}
+bool plat_rename(const char *from, const char *to) { return rename(from, to) == 0; }
+
+// The game's own libcurl (Steam's runtime has it; the engine downloads maps with it), so nothing extra ships.
+typedef void *(*curl_init_t)(void);
+typedef int (*curl_setopt_t)(void *, int, ...);
+typedef int (*curl_perform_t)(void *);
+typedef int (*curl_getinfo_t)(void *, int, ...);
+typedef void (*curl_cleanup_t)(void *);
+static struct { curl_init_t init; curl_setopt_t setopt; curl_perform_t perform; curl_getinfo_t getinfo; curl_cleanup_t cleanup; } g_curl;
+
+void plat_http_init()
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    void *h = nullptr;
+    for (const char *n : {"libcurl-gnutls.so.4", "libcurl.so.4"})
+        if ((h = dlopen(n, RTLD_NOW | RTLD_NOLOAD)) || (h = dlopen(n, RTLD_NOW))) break;
+    if (!h) return;
+    auto global = (int (*)(long))dlsym(h, "curl_global_init");
+    g_curl = {(curl_init_t)dlsym(h, "curl_easy_init"), (curl_setopt_t)dlsym(h, "curl_easy_setopt"),
+              (curl_perform_t)dlsym(h, "curl_easy_perform"), (curl_getinfo_t)dlsym(h, "curl_easy_getinfo"),
+              (curl_cleanup_t)dlsym(h, "curl_easy_cleanup")};
+    if (global) global(3);   // CURL_GLOBAL_DEFAULT; not thread-safe, so here on the main thread
+}
+
+struct HttpBuf { std::string s; };
+static size_t http_write(char *d, size_t sz, size_t n, void *u)
+{
+    HttpBuf *b = (HttpBuf *)u;
+    if (b->s.size() + sz * n > (32u << 20)) return 0;   // (zone lists are a few KB)
+    b->s.append(d, sz * n);
+    return sz * n;
+}
+
+char *plat_http_get(const char *url, size_t *len, int *status)
+{
+    *status = 0;
+    if (!g_curl.init || !g_curl.setopt || !g_curl.perform || !g_curl.getinfo || !g_curl.cleanup) return nullptr;
+    void *c = g_curl.init();
+    if (!c) return nullptr;
+    HttpBuf b;
+    g_curl.setopt(c, 10002, url);                       // CURLOPT_URL
+    g_curl.setopt(c, 20011, (void *)&http_write);       // CURLOPT_WRITEFUNCTION
+    g_curl.setopt(c, 10001, (void *)&b);                // CURLOPT_WRITEDATA
+    g_curl.setopt(c, 52, 1L);                           // CURLOPT_FOLLOWLOCATION
+    g_curl.setopt(c, 99, 1L);                           // CURLOPT_NOSIGNAL
+    g_curl.setopt(c, 78, 15L);                          // CURLOPT_CONNECTTIMEOUT
+    g_curl.setopt(c, 13, 60L);                          // CURLOPT_TIMEOUT
+    g_curl.setopt(c, 10018, "cstv");                    // CURLOPT_USERAGENT
+    long code = 0;
+    if (g_curl.perform(c) == 0) g_curl.getinfo(c, 0x200002, &code);   // CURLINFO_RESPONSE_CODE
+    g_curl.cleanup(c);
+    *status = (int)code;
+    if (code != 200) return nullptr;
+    char *out = (char *)malloc(b.s.size() + 1);
+    if (!out) return nullptr;
+    memcpy(out, b.s.data(), b.s.size());
+    out[b.s.size()] = 0;
+    *len = b.s.size();
+    return out;
+}
 
 bool plat_claim()
 {

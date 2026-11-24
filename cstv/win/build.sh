@@ -29,9 +29,9 @@ CF="$MSVC /clang:-ffile-prefix-map=$C=. -O2 -MT -EHs-c- -GR- -Wno-everything -D_
     -DCLIENT_DLL -D_CRT_SECURE_NO_WARNINGS -DNOMINMAX -I$C/win/sdk-compat -I$SDK/public -I$SDK/public/tier0 \
     -I$SDK/public/tier1 -I$SDK/common -I$C/common -I$C/client -I$C/third_party/stb \
     -FI$C/win/sdk-compat/tier1/bitbuf.h -FI$C/win/sdk-compat/mathlib/ssemath.h"
-for f in cstv_client cstv_gui cstv_platform_win; do
+for f in cstv_client cstv_gui cstv_proglocal cstv_platform_win; do
     clang-cl $CF -c "$C/client/$f.cpp" -Fo"$B/client/$f.obj"
 done
-lld-link -nologo -dll -out:"$OUT/cstv_client.dll" $LIBS "$B"/client/{cstv_client,cstv_gui,cstv_platform_win}.obj \
+lld-link -nologo -dll -out:"$OUT/cstv_client.dll" $LIBS "$B"/client/{cstv_client,cstv_gui,cstv_proglocal,cstv_platform_win}.obj \
     libcmt.lib libvcruntime.lib libucrt.lib kernel32.lib user32.lib ws2_32.lib
 ls -la "$OUT"

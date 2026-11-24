@@ -212,6 +212,88 @@ bool plat_thread(void *(*fn)(void *))
 
 void plat_sleep_ms(int ms) { Sleep((DWORD)ms); }
 
+const char *plat_data_dir()
+{
+    static char dir[MAX_PATH + 16];
+    if (dir[0]) return dir;
+    char base[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("APPDATA", base, MAX_PATH);
+    if (!n || n >= MAX_PATH) return "";
+    snprintf(dir, sizeof dir, "%s\\cstv", base);
+    CreateDirectoryA(dir, nullptr);
+    return dir;
+}
+
+bool plat_mkdir(const char *path) { return CreateDirectoryA(path, nullptr) || GetLastError() == ERROR_ALREADY_EXISTS; }
+bool plat_rename(const char *from, const char *to) { return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) != 0; }
+
+void plat_http_init() {}
+
+void *plat_module_symbol(const char *file, const char *symbol)
+{
+    HMODULE h = GetModuleHandleA(file);
+    return h ? (void *)GetProcAddress(h, symbol) : nullptr;
+}
+
+// WinHTTP, found at run time (only loaded when something is fetched)
+char *plat_http_get(const char *url, size_t *len, int *status)
+{
+    *status = 0;
+    if (strncmp(url, "https://", 8)) return nullptr;
+    const char *h0 = url + 8, *slash = strchr(h0, '/');
+    if (!slash) return nullptr;
+    wchar_t host[256], path[2048];
+    if (!MultiByteToWideChar(CP_UTF8, 0, h0, (int)(slash - h0), host, 255)) return nullptr;
+    host[slash - h0] = 0;
+    if (!MultiByteToWideChar(CP_UTF8, 0, slash, -1, path, 2048)) return nullptr;
+    HMODULE m = LoadLibraryA("winhttp.dll");
+    if (!m) return nullptr;
+    typedef void *HI;
+    auto open = (HI(WINAPI *)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD))(void *)GetProcAddress(m, "WinHttpOpen");
+    auto timeouts = (BOOL(WINAPI *)(HI, int, int, int, int))(void *)GetProcAddress(m, "WinHttpSetTimeouts");
+    auto connect = (HI(WINAPI *)(HI, LPCWSTR, WORD, DWORD))(void *)GetProcAddress(m, "WinHttpConnect");
+    auto request = (HI(WINAPI *)(HI, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD))(void *)GetProcAddress(m, "WinHttpOpenRequest");
+    auto send = (BOOL(WINAPI *)(HI, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR))(void *)GetProcAddress(m, "WinHttpSendRequest");
+    auto receive = (BOOL(WINAPI *)(HI, LPVOID))(void *)GetProcAddress(m, "WinHttpReceiveResponse");
+    auto query = (BOOL(WINAPI *)(HI, DWORD, LPCWSTR, LPVOID, LPDWORD, LPDWORD))(void *)GetProcAddress(m, "WinHttpQueryHeaders");
+    auto read = (BOOL(WINAPI *)(HI, LPVOID, DWORD, LPDWORD))(void *)GetProcAddress(m, "WinHttpReadData");
+    auto close = (BOOL(WINAPI *)(HI))(void *)GetProcAddress(m, "WinHttpCloseHandle");
+    if (!open || !timeouts || !connect || !request || !send || !receive || !query || !read || !close) return nullptr;
+    char *out = nullptr;
+    size_t n = 0, cap = 0;
+    bool ok = false;
+    HI s = open(L"cstv", 4 /* WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY */, nullptr, nullptr, 0);
+    if (s) timeouts(s, 15000, 15000, 30000, 30000);
+    HI c = s ? connect(s, host, 443, 0) : nullptr;
+    HI r = c ? request(c, L"GET", path, nullptr, nullptr, nullptr, 0x00800000 /* WINHTTP_FLAG_SECURE */) : nullptr;
+    DWORD code = 0, csz = sizeof code;
+    if (r && send(r, nullptr, 0, nullptr, 0, 0, 0) && receive(r, nullptr)
+        && query(r, 19 | 0x20000000 /* STATUS_CODE | FLAG_NUMBER */, nullptr, &code, &csz, nullptr)) {
+        *status = (int)code;
+        ok = code == 200;
+        while (ok) {
+            if (cap - n < 65537) {
+                if (cap > (32u << 20)) { ok = false; break; }
+                char *g = (char *)realloc(out, cap = cap * 2 + 65537);
+                if (!g) { ok = false; break; }
+                out = g;
+            }
+            DWORD got = 0;
+            if (!read(r, out + n, 65536, &got)) { ok = false; break; }
+            if (!got) break;
+            n += got;
+        }
+    }
+    if (r) close(r);
+    if (c) close(c);
+    if (s) close(s);
+    if (!ok) { free(out); return nullptr; }
+    if (!out) out = (char *)malloc(1);
+    out[n] = 0;
+    *len = n;
+    return out;
+}
+
 // ---------------------------------------------------------------- the game window's input
 // Our window procedure goes in front of the game's (and inputsystem's), so a message we keep never reaches it.
 static plat_event_fn g_event_fn;

@@ -17,7 +17,7 @@ for f in "$D/windows/bhoptools.exe" "$D/linux/bhoptools.so"; do
     grep -qaF "${TAG#v}" "$f" || { echo "$f isn't built from ${TAG#v}"; exit 1; }
 done
 # pack.py leaves out what's missing; a release must have them all
-for f in curtimefix.dll cstv_client.dll triggerlook.dll p2paint.dll maretf.exe; do
+for f in curtimefix.dll cstv_client.dll triggerlook.dll p2paint.dll maretf.exe mcassets.py; do
     [ -f "$D/windows/$f" ] || { echo "dist/windows/$f is missing"; exit 1; }
 done
 rm -rf "$OUT"

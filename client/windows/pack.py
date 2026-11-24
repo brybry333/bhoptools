@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""pack.py <bhoptools.exe> <dist/windows>: appends the module DLLs, maretf.exe, CS:TV's game files (cstv/materials,
-cstv/resource) and the licenses to bhoptools.exe, after the program image: main.cpp UnpackFiles puts them next to the
+"""pack.py <bhoptools.exe> <dist/windows>: appends the module DLLs, maretf.exe, mcassets.py (the Progress Log's
+Minecraft book, fetched on the player's PC), CS:TV's game files (cstv/materials, cstv/resource) and the licenses to bhoptools.exe, after the program image: main.cpp UnpackFiles puts them next to the
 exe on start. Files missing from dist/windows are left out. CS:TV's video helper (the rest of dist/windows/cstv) is
 the separate zip (tools/make-release.sh).
 
@@ -11,7 +11,7 @@ import struct
 import sys
 
 exe, dist = sys.argv[1], sys.argv[2]
-files = [n for n in ("curtimefix.dll", "cstv_client.dll", "triggerlook.dll", "p2paint.dll", "maretf.exe")
+files = [n for n in ("curtimefix.dll", "cstv_client.dll", "triggerlook.dll", "p2paint.dll", "maretf.exe", "mcassets.py")
          if os.path.isfile(os.path.join(dist, n))]
 for sub in ("cstv/materials", "cstv/resource", "LICENSES"):
     for root, _, names in os.walk(os.path.join(dist, sub)):

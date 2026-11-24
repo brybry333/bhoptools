@@ -16,16 +16,33 @@ void gui_hud_toggle();                    // !tv hud / `cstv hud`
 const char *gui_shared_audience();        // who sees the shared screen here, e.g. "lobby K7Q2MX (3 players here)"
 bool gui_in_lobby();                      // the hub says we're in a lobby (for !leave)
 bool gui_hub_up();                        // cstvd is connected to cstv.xyz
-// The Progress Log (cstv_prog.inc): the same window with its own pages, fed by the server's progresslog plugin
-void gui_prog_cmd(int argc, const char *const *argv, bool test);   // `prog_ui ...` from the server; test = `prog_ui_test`
+// The Progress Log (cstv_prog.inc): the same window with its own pages, fed by its backend on this PC
+// (cstv_proglocal.cpp; servers' progresslog plugins are ignored)
+void gui_prog_cmd(int argc, const char *const *argv, bool test);   // `prog_ui ...` typed or from a server: only test = `prog_ui_test`
+void gui_prog_apply(int argc, const char *const *argv);           // the backend's `prog_ui ...` lines
 void gui_prog_open();
-void gui_prog_toggle();                     // `cstv_book`: opens it where the server has the plugin, closes it if open
-void gui_prog_level_end();                  // left the map: the next server has to say it has the plugin
+void gui_prog_toggle();                     // `cstv_book`: opens or closes it
+void gui_prog_level_end();
+
+// The Progress Log's backend (cstv_proglocal.cpp): the log in files on this PC, runs followed in the game
+class IVEngineClient;
+class IBaseClientDLL;
+class IClientEntityList;
+void pl_setup(IVEngineClient *engine, IBaseClientDLL *client, IClientEntityList *ents);   // interfaces up
+void pl_level_init();                       // LevelInitPostEntity
+void pl_level_end();                        // LevelShutdown
+void pl_frame();                            // once a frame
+void pl_command(const char *line);          // the book's `sm_progui ...` lines
+bool pl_chat(const char *text);             // a chat line: !prog, !progsave, !progmenu taken (true)
+void pl_console(const char *verb, const char *args);   // sm_prog / sm_progsave / sm_progmenu typed or bound
+void pl_debug();                            // `prog_debug`: what the run tracking sees
+void pl_refetch_zones();                    // `prog_zones`: this map's zones downloaded again
 
 // GUI -> core (implemented in cstv_client.cpp)
 bool cstv_enabled();                      // bhoptools' Options switch (cstv_enable)
 void cstv_helper_line(const char *line);  // send one line to cstvd (no trailing newline needed)
 void cstv_print(const char *text);        // a CS:TV chat line for this player only
+void cstv_chat_line(const char *line);    // a chat line as it is (colour codes and all) for this player only
 void cstv_volume_preview(int vol);        // the volume slider while it's dragged (0-100; pref vol saves it)
 
 // Place mode: the core traces and draws the preview; the GUI swallows its keys and draws the hint bar.

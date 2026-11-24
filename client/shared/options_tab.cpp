@@ -15,7 +15,8 @@
 #include <cwchar>
 #include <vector>
 
-// paint's p2paint_server(): 1 = this server runs the paint plugin, 0 = it doesn't, -1 = can't tell / no paint
+// paint's p2paint_server(): 1 = paint works here, 0 = it doesn't (an older p2paint on a server without its plugin;
+// p2paint 12+ paints everywhere, so never), -1 = can't tell / no paint
 // (linux/preload.cpp, windows/main.cpp)
 int PaintServerState();
 // opens a web page in the player's browser, off the game thread's way; url = a constant (it's read later on another

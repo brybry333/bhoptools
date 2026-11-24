@@ -1087,6 +1087,35 @@ static void InstallCstvFiles(const std::string& css_path)
 	}
 }
 
+// The Progress Log's Minecraft look: mcassets.py (next to bhoptools.exe) puts Minecraft's book pictures, font and
+// sounds into custom\cstv, from a Minecraft install on this PC or Mojang's download server (Mojang's files never ship
+// with bhoptools). Runs with CS:TV's Python (the video zip), hidden and in the background: the game starts meanwhile
+// and the book picks the files up when they arrive. The script does nothing once they're there and waits 6 hours
+// after a failed try; its log is cstv\mcassets.log.
+static void RunMcassets(const std::string& css_path)
+{
+	wchar_t game[MAX_PATH];
+	if (!MultiByteToWideChar(CP_ACP, 0, css_path.c_str(), -1, game, MAX_PATH)) return;
+	const std::wstring out = std::wstring(game) + L"cstrike\\custom\\cstv";
+	if (GetFileAttributesW((out + L"\\resource\\cstv\\progbook.bin").c_str()) != INVALID_FILE_ATTRIBUTES &&
+		GetFileAttributesW((out + L"\\sound\\progbook\\click.wav").c_str()) != INVALID_FILE_ATTRIBUTES)
+		return;
+	std::wstring dir = g_cstvDll;
+	dir.erase(dir.rfind(L'\\') + 1);
+	const std::wstring python = dir + L"cstv\\python\\python.exe", script = dir + L"mcassets.py";
+	if (GetFileAttributesW(python.c_str()) == INVALID_FILE_ATTRIBUTES || GetFileAttributesW(script.c_str()) == INVALID_FILE_ATTRIBUTES)
+		return;	// no CS:TV video zip (its Python) or no script: a plain book
+	std::wstring cmd = L"\"" + python + L"\" -I \"" + script + L"\" --auto --out \"" + out + L"\" --mpv \"" + dir +
+		L"cstv\\libmpv-2.dll\" --log \"" + dir + L"cstv\\mcassets.log\"";
+	STARTUPINFOW si = { sizeof(si) };
+	PROCESS_INFORMATION pi = {};
+	if (CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, (dir + L"cstv").c_str(), &si, &pi)) {
+		printf("getting the Progress Log's Minecraft book from Minecraft (once, in the background)\n\n");
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+	}
+}
+
 std::string GetCSSPath(std::string const & steampath)
 {
 	std::ifstream libraryfolders(steampath + "\\steamapps\\libraryfolders.vdf");
@@ -1377,8 +1406,10 @@ int main()
 	// Before the game starts and mounts cstrike\custom\*: Options > Keyboard's list with the bhoptools rows,
 	// and CS:TV's screen materials and fonts (always copied: a redrawn texture keeps its size).
 	keylists::Write(css_path + "cstrike\\");
-	if (g_cstvDll[0])
+	if (g_cstvDll[0]) {
 		InstallCstvFiles(css_path);
+		RunMcassets(css_path);
+	}
 
 	HANDLE game = NULL;
 	DWORD game_pid = 0;

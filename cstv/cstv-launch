@@ -62,6 +62,13 @@ trap 'exit 143' TERM
 # ---- the client mod's materials: drawn client-side, so every player needs them
 for a in "${args[@]}"; do
     [[ $a == */cstrike.sh || $a == */cstrike_linux64 || $a == */hl2.sh ]] || continue
+    # the Progress Log's Minecraft book, once: from a Minecraft install here or Mojang's download server, in the
+    # background (the book picks it up when it's there); mcassets.py returns at once when it is
+    if [[ -f $DIR/mcassets.py ]] && command -v python3 >/dev/null; then
+        mkdir -p "$HOME/.cache/cstv"
+        env -u LD_PRELOAD -u LD_LIBRARY_PATH python3 -I "$DIR/mcassets.py" --auto --out "$(dirname "$a")/cstrike/custom/cstv" \
+            --log "$HOME/.cache/cstv/mcassets.log" </dev/null >/dev/null 2>&1 &
+    fi
     for sub in materials/cstv resource/cstv; do
         dest=$(dirname "$a")/cstrike/custom/cstv/$sub
         for f in "$DIR/assets/$sub"/*; do

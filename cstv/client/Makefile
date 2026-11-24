@@ -12,7 +12,7 @@ CXXFLAGS := -O2 -g -Wall -Wno-unused-parameter -Wno-unknown-pragmas -std=c++17 -
             -fvisibility=hidden -fvisibility-inlines-hidden -fno-stack-protector "-ffile-prefix-map=$(abspath ..)=."
 LDFLAGS  := -shared -static-libstdc++ -static-libgcc -Wl,--no-undefined -Wl,--exclude-libs,ALL \
             -Wl,--version-script=cstv.ver -Wl,--no-as-needed -l:libdl.so.2 -l:libpthread.so.0
-SRCS     := cstv_client.cpp cstv_gui.cpp cstv_capture.cpp glibc_compat.cpp
+SRCS     := cstv_client.cpp cstv_gui.cpp cstv_proglocal.cpp cstv_capture.cpp glibc_compat.cpp
 
 libcstv.so: $(SRCS) cstv_prog.inc cstv_gui.h cstv_capture.h cstv_place.h cstv_platform.h cstv.ver ../common/cstv_proto.h
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS) $(LDFLAGS)

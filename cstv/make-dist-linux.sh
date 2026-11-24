@@ -10,7 +10,7 @@ make -C "$C/client" check-glibc
 make -C "$C/helper" -B
 rm -rf "$R"
 mkdir -p "$R/client" "$R/helper" "$R/assets"
-cp "$C/cstv-launch" "$R/"
+cp "$C/cstv-launch" "$C/mcassets.py" "$R/"
 cp "$C/client/libcstv.so" "$R/client/"
 cp "$C"/helper/{cstvd,cstv_link.py,cstv_overlay.py,cstv_ytdl.py} "$R/helper/"
 cp -r "$C/helper/fonts" "$R/helper/"

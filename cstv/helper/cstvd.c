@@ -2668,7 +2668,8 @@ static int m_allowed(const char *l)
 {
     static const char *const ok[] = {"where", "place", "remove", "link", "queue", "unqueue", "playnow", "clearqueue",
                                      "next", "prev", "pause", "seek", "speed", "loop",
-                                     "login", "logout", "status", "chat", "lobbies", "gifs", "chatgif"};   // cstv.xyz: sign-in, lobby chat, lists
+                                     "login", "logout", "status", "chat", "lobbies", "gifs", "chatgif",   // cstv.xyz: sign-in, lobby chat, lists
+                                     "paint"};   // the paint mod (p2paint): shared with the other mod users on this server
     static const char *const lobby[] = {"create", "join", "leave", "kick", "ban", "unban", "owner", "perm", "name", "password",
                                         "set", "delete"};
     char v[16] = "", sub[16] = "";

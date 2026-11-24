@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------- Progress Log (!prog): a Minecraft book
 // A practice diary drawn as Minecraft's book: page 1 (the log: the day's attempts as boss bars, and the form to
 // add one or change one) on its own, then spreads: 2 graph | 3 stats, 4 spots | 5 settings. Its pictures, font
-// and sounds are Minecraft's own, taken from the player's install by tools/mcassets.py into cstrike/custom/cstv
-// (resource/cstv/progbook.bin, progfont.txt, sound/progbook/*.wav); without them it's a plain book. The book's
+// and sounds are Minecraft's own, put into cstrike/custom/cstv by mcassets.py on the player's PC (from a Minecraft
+// install there, or Mojang's download server; the launchers run it): resource/cstv/progbook.bin, progfont.txt,
+// sound/progbook/*.wav. Without them it's a plain book (looked for again every few seconds while it's open). The book's
 // pixels are g_book_f screen px (x5 at 1080p), its text's and widgets' g_book_t (x2): finer, or a page would
 // hold 14 lines as in the game. Pictures go up once per scale as VGUI textures (DrawSetTextureRGBA, upscaled
 // here: VGUI filters them) and are drawn with DrawTexturedSubRect, the graph the same way when it changes.
@@ -10,17 +11,18 @@
 // inputs, PgUp / PgDn (or Left / Right with nothing picked) turn pages, Delete deletes the picked attempt or spot
 // (asking Yes / No: arrows, Enter; Esc = No), Esc closes.
 //
-// The server's progresslog plugin keeps the entries (per player and map, one day each) and sends them with
-// `prog_ui ...` (server-executable, cstv_client.cpp); what the book changes goes back as `sm_progui ...`.
+// Its backend on this PC (cstv_proglocal.cpp: the log in files, runs followed in the game) keeps the entries (per
+// map, one day each) and sends them with `prog_ui ...` lines (gui_prog_apply); what the book changes goes to it as
+// `sm_progui ...` (pl_command). The same lines the progresslog SourceMod plugin used to send; servers that still
+// run it are ignored.
 // Everything is run time (seconds). "End" is a spot like the others but one time: your estimated finish, the
 // 100 % that percentages show against. The other spots are a range (where you get to a place, varying).
 //
-// From the server:  prog_ui hello                          (answer: sm_progui hello 2)
-//                   prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin>
+// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin>
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
 //                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin>
 //                   prog_ui done | open | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
-// To the server:    sm_progui hello 2 | sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
+// To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | set autofinish|saveat|bin <n>
 // Included into cstv_gui.cpp (its fonts, input and primitives).
 #include <functional>
@@ -83,7 +85,7 @@ static void p_send(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    if (g_engine) g_engine->ServerCmd(buf, true);
+    pl_command(buf);
 }
 
 // what can go inside the quotes of a console command
@@ -301,15 +303,23 @@ static std::vector<const PEntry *> p_day_entries(const std::string &day)   // ""
     return v;
 }
 
-// ---- from the server
+// ---- from the backend
 void gui_prog_open();
-static bool g_prog_server;   // this server runs the Progress Log plugin
 static void p_view(int v, bool sound = true);
 static void p_focus(int id);
 static void p_ask(const std::string &title, const std::string &sub, std::function<void()> yes);
 static void p_ask_close(bool yes);
 
+static void p_apply(int argc, const char *const *argv, bool test);
+void gui_prog_apply(int argc, const char *const *argv) { p_apply(argc, argv, false); }
+
+// `prog_ui ...` from the console or a server: a server's progresslog plugin is ignored (the log is on this PC now)
 void gui_prog_cmd(int argc, const char *const *argv, bool test)
+{
+    if (test) p_apply(argc, argv, true);
+}
+
+static void p_apply(int argc, const char *const *argv, bool test)
 {
     if (argc < 2) return;
     std::string v = argv[1];
@@ -317,9 +327,7 @@ void gui_prog_cmd(int argc, const char *const *argv, bool test)
     auto F = [&](int i) { float t = i < argc ? (float)atof(argv[i]) : -1.0f; return t >= 0 && t <= 86400 ? t : -1.0f; };
     auto I = [&](int i) { return i < argc ? atoi(argv[i]) : 0; };
     auto A = [&](int i) { return std::string(i < argc ? argv[i] : ""); };
-    g_prog_server = true;   // only the plugin sends these
-    if (v == "hello") p_send("sm_progui hello 2");
-    else if (v == "reset" && argc >= 7) {
+    if (v == "reset" && argc >= 7) {
         pg.map = A(2); pg.today = A(3); pg.daystart = I(4); pg.autofinish = I(5) != 0; pg.saveat_here = I(6) != 0;
         if (argc >= 8 && I(7) >= 5) pg.bin = I(7);
         pg.e.clear(); pg.spots.clear(); pg.end = -1;
@@ -392,14 +400,13 @@ static void prog_on_close() { p_send("sm_progui view 0"); g_focus = 0; }
 void gui_prog_toggle()
 {
     if (g_open && g_mode == MODE_PROG) { close_window(); return; }
-    if (!g_prog_server) { cstv_print("This server doesn't have the Progress Log."); return; }
     gui_prog_open();
 }
 
-void gui_prog_level_end() { g_prog_server = false; }
+void gui_prog_level_end() {}
 
 // ---------------------------------------------------------------- Minecraft's pictures
-// progbook.bin (mcassets.py): "PBK1", a count, then (name[32], u16 w, u16 h, u32 offset) each, then RGBA pixels
+// progbook.bin (cstv/mcassets.py): "PBK1", a count, then (name[32], u16 w, u16 h, u32 offset) each, then RGBA pixels
 enum { PS_BOOK, PS_BOOK_M, PS_FWD, PS_FWD_HL, PS_BACK, PS_BACK_HL, PS_TAB, PS_TAB_ON, PS_ICON_BOOK, PS_ICON_MAP, PS_ICON_COMPASS,
        PS_BUTTON, PS_BUTTON_HL, PS_BUTTON_OFF, PS_SCROLLER, PS_SCROLLER_BG, PS_TOOLTIP, PS_POPUP,
        PS_XP_BG, PS_XP_GREEN, PS_XP_BLUE, PS_XP_RED, PS_XP_RAINBOW, PS_FONT_ASCII, PS_FONT_NONLATIN, PS_COUNT };
@@ -418,6 +425,7 @@ static std::vector<PGlyph> g_pglyphs;   // by code point
 struct PImg { int w = 0, h = 0; std::vector<unsigned char> px; };
 static PImg g_pimg[PS_COUNT];
 static int g_passets = -1;   // -1 not looked for yet, 0 none (a plain book), 1 loaded
+static double g_passets_at;  // when it last looked: none yet = again 5 s later (mcassets.py may be fetching them)
 static bool g_psounds, g_part;
 
 // a file in cstrike/custom/cstv: from the game's folder (Steam starts the game in it), else the executable's
@@ -441,8 +449,10 @@ static FILE *p_open_asset(const char *rel)
 
 static void p_load_assets()
 {
+    if (g_passets == 0 && plat_now() - g_passets_at > 5) g_passets = -1;
     if (g_passets >= 0) return;
     g_passets = 0;
+    g_passets_at = plat_now();
     FILE *f = p_open_asset("resource/cstv/progbook.bin");
     if (!f) return;
     std::vector<unsigned char> d;
