@@ -643,6 +643,28 @@ std::string zone_cache(const std::string &map)
     return d + SEP + map + ".json";
 }
 
+// The zones a server sent for the map (its bhoptools plugin), kept in the zone list's json form: used on servers that
+// don't send theirs when the zone list hasn't got the map.
+std::string saved_zones_path(const std::string &map)
+{
+    std::string c = zone_cache(map);
+    return c.empty() ? "" : c.substr(0, c.size() - 5) + ".server.json";
+}
+
+void save_server_zones(const std::string &map, const std::vector<Zone> &z)
+{
+    std::string text = "[", old;
+    char b[256];
+    for (const Zone &q : z) {
+        snprintf(b, sizeof b, "%s{\"type\":\"%s\",\"track\":%d,\"point_a\":[%.3f,%.3f,%.3f],\"point_b\":[%.3f,%.3f,%.3f]}",
+                 text.size() > 1 ? "," : "", q.type ? "end" : "start", q.track, q.lo[0], q.lo[1], q.lo[2], q.hi[0], q.hi[1], q.hi[2]);
+        text += b;
+    }
+    text += "]";
+    std::string path = saved_zones_path(map);
+    if (!read_file(path, old) || old != text) write_file(path, text);
+}
+
 time_t file_age(const std::string &path)
 {
     struct stat st;
@@ -654,13 +676,16 @@ std::string g_fetch_map;   // handed to the thread (set before it starts)
 
 void zones_ready(const std::string &map, std::vector<Zone> z, const char *status)
 {
+    std::string why = status, text;
+    if (z.empty() && read_file(saved_zones_path(map), text) && parse_zones(text.c_str(), z) && !z.empty())
+        why += "; using the zones a server sent before";
     std::lock_guard<std::mutex> l(g_zmu);
     if (map != g_zone_map || g_zones_server) return;   // the map changed meanwhile, or the server sent its own
     g_zones = std::move(z);
-    char b[96];
+    char b[192];
     int st = 0, en = 0;
     for (const Zone &q : g_zones) (q.type ? en : st)++;
-    snprintf(b, sizeof b, "%s: %d start, %d end", status, st, en);
+    snprintf(b, sizeof b, "%s: %d start, %d end", why.c_str(), st, en);
     g_zone_status = b;
 }
 
@@ -679,9 +704,16 @@ void *fetch_thread(void *)
         write_file(cache, "[]");   // not in the list: asked again in a week
         zones_ready(map, z, "no zones for this map in the zone list");
     } else {   // no good answer: the zones the cache gave stay
-        std::lock_guard<std::mutex> l(g_zmu);
-        if (map == g_zone_map && !g_zones_server)
-            g_zone_status =std::string(status ? "zone list: bad answer" : "zone list: no connection") + ", kept " + std::to_string(g_zones.size()) + " cached zones";
+        const char *why = status ? "zone list: bad answer" : "zone list: no connection";
+        bool none = false;
+        {
+            std::lock_guard<std::mutex> l(g_zmu);
+            if (map == g_zone_map && !g_zones_server) {
+                none = g_zones.empty();
+                g_zone_status = std::string(why) + ", kept " + std::to_string(g_zones.size()) + " cached zones";
+            }
+        }
+        if (none) zones_ready(map, z, why);   // nothing cached: the zones a server sent before, if any
     }
     free(body);
     return nullptr;
@@ -795,6 +827,7 @@ void poll_server_zones()
     }
     // an empty list (published before shavit loaded the map's zones) doesn't replace the zone list's
     if (z.empty()) return;
+    save_server_zones(M.map, z);   // for servers that don't send theirs
     std::lock_guard<std::mutex> l(g_zmu);
     g_zones_server = true;
     g_zones = std::move(z);
