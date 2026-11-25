@@ -198,9 +198,6 @@ inline unsigned long long MonotonicMs()
 	return (unsigned long long)ts.tv_sec * 1000ULL + (unsigned long long)ts.tv_nsec / 1000000ULL;
 }
 
-// The options slider polls it while it's dragged.
-bool LeftMouseDown();
-
 inline double MonotonicSeconds()
 {
 	timespec ts;

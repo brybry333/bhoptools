@@ -507,6 +507,7 @@ void LoadLevel(const char* levelName)
 
         UseMapDiff(*map);
         PredBuildTriggers(*map);
+        if (map->stats.overCap) CoreLog("bhoptools: %s has too many outputs; its triggers aren't predicted", levelName);
         PredAdopt(g_rt, map);
         RngPredictSetBsp(*g_rngp, g_rt.map);
         return;
@@ -670,6 +671,7 @@ void PrintTriggers()
     if (!g_enabled) CoreLog("triggers: off");
     else if (problem) CoreLog("triggers: off (%s)", problem);
     else if (g_levelFailed || !g_rt.map) CoreLog("triggers: off (no map data)");
+    else if (g_rt.map->stats.overCap) CoreLog("triggers: off (the map has too many outputs)");
     else if (g_mpbhopsLoaded) CoreLog("triggers: on, %d triggers, %d mpbhops doors", g_rt.map->stats.active, (int)g_rt.map->mpbhopsDoors.size());
     else CoreLog("triggers: on, %d triggers", g_rt.map->stats.active);
 }
@@ -1602,6 +1604,7 @@ void OnLevelInit()
     if (g_rt.map && UseMapDiff(*g_rt.map)) {
         g_rt.map->stats = decltype(g_rt.map->stats)();
         PredBuildTriggers(*g_rt.map);
+        if (g_rt.map->stats.overCap) CoreLog("bhoptools: the map has too many outputs; its triggers aren't predicted");
         if (g_rngp) g_rngp->rng.otherFor = nullptr;
     }
     if (g_rt.map) PredRestart(g_rt);
@@ -1773,12 +1776,12 @@ void TeleportPredict_OnCheckpointSave(int cpIndex)
     PredSaveCheckpoint(tp::g_rt, (*tp::g_checkpoints)[cpIndex]);
 }
 
-void TeleportPredict_PruneCheckpoints(bool (*inUse)(int cpIndex))
+void TeleportPredict_PruneCheckpoints(const std::vector<int>& inUse)
 {
     if (!tp::g_checkpoints) return;
     for (auto it = tp::g_checkpoints->begin(); it != tp::g_checkpoints->end();) {
         // A load waiting for the next move points at its state.
-        if (&it->second == tp::g_rt.cp.load || inUse(it->first)) ++it;
+        if (&it->second == tp::g_rt.cp.load || std::binary_search(inUse.begin(), inUse.end(), it->first)) ++it;
         else it = tp::g_checkpoints->erase(it);
     }
 }

@@ -131,43 +131,10 @@ static bool load_sdl()
 }
 
 // ---------------------------------------------------------------- text helpers
-static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-static std::string b64enc(const std::string &in)
-{
-    std::string out;
-    unsigned acc = 0;
-    int bits = 0;
-    for (unsigned char c : in) {
-        acc = (acc << 8) | c;
-        bits += 8;
-        while (bits >= 6) { bits -= 6; out += B64[(acc >> bits) & 63]; }
-    }
-    if (bits) out += B64[(acc << (6 - bits)) & 63];
-    return out;
-}
-
-// "-" is the protocol's empty value. False on anything that isn't base64url.
-static bool b64dec(const std::string &in, std::string &out)
-{
-    out.clear();
-    if (in == "-") return true;
-    unsigned acc = 0;
-    int bits = 0;
-    for (char c : in) {
-        const char *p = strchr(B64, c);
-        if (!c || !p) return false;
-        acc = (acc << 6) | (unsigned)(p - B64);
-        bits += 6;
-        if (bits >= 8) { bits -= 8; out += (char)((acc >> bits) & 0xff); }
-    }
-    return true;
-}
-
 static std::string dec(const std::string &in)
 {
     std::string s;
-    return b64dec(in, s) ? s : std::string();
+    return b64decode(in, s) ? s : std::string();
 }
 
 static void split(const std::string &s, char sep, std::vector<std::string> &out)
@@ -281,6 +248,7 @@ static struct {
 } st;
 
 static void open_window();
+static void open_warning();
 static void chat_insert(const std::string &word);
 static void set_chat_mode(int m);
 static bool gui_lchat_on();
@@ -293,7 +261,7 @@ static void on_srv(const std::vector<std::string> &w)
     std::vector<std::string> f;
     if (v == "url" && w.size() >= 4) {
         std::string u;
-        if (!b64dec(w[3], u)) return;
+        if (!b64decode(w[3], u)) return;
         st.url = u;
         st.title.clear();
         st.have_state = false;
@@ -363,7 +331,7 @@ static void on_srv(const std::vector<std::string> &w)
         for (size_t i = 2; i < w.size(); i++) {
             split(w[i], ',', f);
             std::string u;
-            if (f.size() < 4 || !b64dec(f[0], u) || u.empty()) continue;
+            if (f.size() < 4 || !b64decode(f[0], u) || u.empty()) continue;
             st.history.push_back({u, dec(f[1]), dec(f[2]), atol(f[3].c_str())});
         }
     } else if (v == "lobbies" && w.size() >= 5) {   // lobbies <page> <pages> <total> code,locked,people,name,playing...
@@ -384,7 +352,7 @@ static void on_srv(const std::vector<std::string> &w)
         st.l_perms = atoi(w[6].c_str());
     } else if (v == "warn" && w.size() >= 3) {
         st.warning = dec(w[2]);
-        if (!st.warning.empty()) open_window();
+        if (!st.warning.empty()) open_warning();
     } else if (v == "kicked") {
         st.notice = "You were removed from the lobby";
         std::string why = w.size() >= 3 ? dec(w[2]) : "";
@@ -451,6 +419,7 @@ enum { MODE_CSTV, MODE_PROG };
 static int g_mode;            // what the window shows: CS:TV, or the Progress Log (cstv_prog.inc)
 static void prog_on_close();
 static bool prog_esc();       // the Progress Log takes Esc (closes its Yes / No question) instead of closing
+static bool prog_typing();    // a Progress Log text field has the keyboard (its buttons can have it too)
 static bool g_hud_edit;       // the window shows only the HUD screen, to be dragged and resized
 static int g_toggle_scan;     // SDL scancode of the key bound to `cstv`, or 0
 static int g_toggle_button;   // SDL mouse button bound to it, or 0
@@ -496,7 +465,9 @@ static int handle_event(SdlEvent *e)
     case EV_KEYDOWN: {
         int sc = e->key.scancode;
         if (sc == SC_ESCAPE && g_mode == MODE_PROG && !e->key.repeat && prog_esc()) return 0;
-        if (sc == SC_ESCAPE || (!e->key.repeat && ((g_toggle_scan && sc == g_toggle_scan) || (g_book_scan && sc == g_book_scan)))) {
+        // the key bound to cstv / cstv_book closes the window, but while typing in a field it's only a letter
+        bool typing = g_mode == MODE_PROG ? prog_typing() : g_focus != 0;
+        if (sc == SC_ESCAPE || (!e->key.repeat && !typing && ((g_toggle_scan && sc == g_toggle_scan) || (g_book_scan && sc == g_book_scan)))) {
             if (e->key.repeat || !st.warning.empty()) return 0;
             if (g_hud_edit && sc == SC_ESCAPE) end_hud_edit();   // back to the window
             else close_window();
@@ -924,7 +895,7 @@ static void toast(const std::string &s) { g_toast = s; g_toast_at = plat_now(); 
 static void play(const std::string &url, bool queue)
 {
     if (url.empty()) return;
-    send("m %s %s", queue ? "queue" : "link", b64enc(url).c_str());
+    send("m %s %s", queue ? "queue" : "link", b64encode(url).c_str());
     toast(queue ? "Added to the queue" : "Playing");
 }
 
@@ -1036,7 +1007,7 @@ static void roster_list(int x, int y, int w, int lh)
     }
 }
 
-static std::string b64_or_dash(const std::string &v) { return v.empty() ? "-" : b64enc(v); }
+static std::string b64_or_dash(const std::string &v) { return v.empty() ? "-" : b64encode(v); }
 
 static std::string my_name()
 {
@@ -1050,7 +1021,7 @@ static void join_lobby(const std::string &code, const std::string &pw)
     std::string c = code;
     for (char &ch : c) ch = (char)toupper((unsigned char)ch);
     if (pw.empty()) send("m lobby join %s", c.c_str());
-    else send("m lobby join %s %s", c.c_str(), b64enc(pw).c_str());
+    else send("m lobby join %s %s", c.c_str(), b64encode(pw).c_str());
     st.notice.clear();
 }
 
@@ -1323,7 +1294,7 @@ static void side_chat(int x, int y, int w, int h)
         send("lchat size %d %d %d", w, ph, sc);
         send("lchat show 1");
         send("lchat mode %s", g_chat_mode == 0 ? "chat" : g_chat_mode == 1 ? "emotes" : "gifs");
-        if (!st.you_name.empty()) send("lchat me %s", b64enc(st.you_name).c_str());
+        if (!st.you_name.empty()) send("lchat me %s", b64encode(st.you_name).c_str());
         draft_sent = "\x01";   // and the draft again
     }
     // the message being written, so the renderer shows its emotes before it's sent
@@ -1381,7 +1352,7 @@ static void side_chat(int x, int y, int w, int h)
     }
     bool go = textbox(11, g_chat_text, 300, tx, ry, tw, ih, "Message");
     if ((button(x + w - sw, ry, sw, ih, "Send", B_ACTIVE, !g_chat_text.empty()) || go) && !g_chat_text.empty()) {
-        send("m chat %s", b64enc(g_chat_text).c_str());
+        send("m chat %s", b64encode(g_chat_text).c_str());
         g_chat_text.clear();
         g_focus = 11;
     }
@@ -1495,8 +1466,8 @@ static void side_history(int x, int y, int w, int h)
         std::string sub = e.by + (e.at ? (e.by.empty() ? "" : "  ") + ago(e.at) : "");
         text(F_SMALL, x + S(4), ry + S(8) + g_font_tall[F_BODY], C_SUB, sub, bx - x - S(12));
         int by = ry + (rh - bh) / 2;
-        if (button(bx, by, S(56), bh, "Play")) send("m link %s", b64enc(e.url).c_str());
-        if (button(bx + S(60), by, S(56), bh, "Queue")) send("m queue %s", b64enc(e.url).c_str());
+        if (button(bx, by, S(56), bh, "Play")) send("m link %s", b64encode(e.url).c_str());
+        if (button(bx + S(60), by, S(56), bh, "Queue")) send("m queue %s", b64encode(e.url).c_str());
     }
 }
 
@@ -1541,7 +1512,7 @@ static void side_settings(int x, int y, int w, int h)
         section(x, y, "NAME");
         bool go = textbox(7, g_rename, 40, x, y, w - bw - gap, bh, st.room_label.c_str());
         if ((button(x + w - bw, y, bw, bh, "Save", B_NORMAL, !g_rename.empty()) || go) && !g_rename.empty()) {
-            send("m lobby name %s", b64enc(g_rename).c_str());
+            send("m lobby name %s", b64encode(g_rename).c_str());
             g_rename.clear();
         }
         y += bh + S(14);
@@ -1549,7 +1520,7 @@ static void side_settings(int x, int y, int w, int h)
         section(x, y, pwl.c_str());
         go = textbox(8, g_set_pw, 64, x, y, w - bw - gap, bh, "New password", true);
         if ((button(x + w - bw, y, bw, bh, "Set", B_NORMAL, !g_set_pw.empty()) || go) && !g_set_pw.empty()) {
-            send("m lobby password %s", b64enc(g_set_pw).c_str());
+            send("m lobby password %s", b64encode(g_set_pw).c_str());
             g_set_pw.clear();
         }
         y += bh + gap;
@@ -1802,7 +1773,7 @@ static void tab_lobby(int x, int y, int w, int h)
         go = textbox(5, g_new_pw, 64, x + nw + gap, y, pw, bh, "Password (optional)", true) || go;
         if (button(x + nw + pw + 2 * gap, y, S(150), bh, "Create lobby", B_ACTIVE) || go) {
             if (g_new_pw.empty()) send("m lobby create %s", b64_or_dash(g_new_name).c_str());
-            else send("m lobby create %s %s", b64_or_dash(g_new_name).c_str(), b64enc(g_new_pw).c_str());
+            else send("m lobby create %s %s", b64_or_dash(g_new_name).c_str(), b64encode(g_new_pw).c_str());
             g_new_name.clear();
             g_new_pw.clear();
             g_lobby_view = 0;
@@ -2334,12 +2305,6 @@ static void hk_paint(void *self, VPANEL panel, bool force, bool allow)
     bool ours = (g_open || placing || gui_hud_on()) && layout(sw, sh);
     if (ours) draw_hud_screen(sw, sh);
     capture_paint();   // the stream gets the HUD and the HUD screen, but not the window or the place-mode hint
-    if (!ours) return;
-    if (placing && !g_open) draw_place_hint(sw, sh);
-    if (g_open) {
-        draw(sw, sh);
-        if (g_open) draw_cursor();
-    }
     if (g_lchat_showing && !gui_lchat_on()) {   // the Lobby page's chat isn't shown any more: the renderer can rest
         g_lchat_showing = false;
         send("lchat show 0");
@@ -2348,6 +2313,12 @@ static void hk_paint(void *self, VPANEL panel, bool force, bool allow)
     bool xchat = gui_xchat_on();
     if (xchat_was && !xchat) send("xchat 0");   // the Live tab closed: the stream chat only if wanted beside the screen
     xchat_was = xchat;
+    if (!ours) return;
+    if (placing && !g_open) draw_place_hint(sw, sh);
+    if (g_open) {
+        draw(sw, sh);
+        if (g_open) draw_cursor();
+    }
 }
 
 bool gui_install()
@@ -2362,8 +2333,10 @@ bool gui_install()
 #else
     const int paint_traverse = 42;
 #endif
-    g_orig_paint = (PaintTraverse_t)plat_swap_slot(g_panel, paint_traverse, (void *)hk_paint);
-    if (!g_orig_paint) return false;
+    g_orig_paint = (PaintTraverse_t)(*(void ***)g_panel)[paint_traverse];   // set before the swap: a paint can come right after it
+    void *was = plat_swap_slot(g_panel, paint_traverse, (void *)hk_paint);
+    if (!was) return false;
+    g_orig_paint = (PaintTraverse_t)was;   // (someone else's hook, if one went in meanwhile)
 #ifndef _WIN32
     SDL_GetEventFilter_(&g_prev_filter, &g_prev_data);
     SDL_SetEventFilter_(gui_filter, nullptr);
@@ -2424,6 +2397,14 @@ void gui_toggle()
     }
     if (!cstv_enabled()) { cstv_print("CS:TV is off (Options > bhoptools)."); return; }   // closing still works
     if (g_open) close_window();   // the Progress Log was up: CS:TV instead
+    g_mode = MODE_CSTV;
+    open_window();
+}
+
+// an admin's warning shows on the CS:TV page only: the book or the HUD editor make way
+static void open_warning()
+{
+    if (g_open && (g_mode != MODE_CSTV || g_hud_edit)) close_window();
     g_mode = MODE_CSTV;
     open_window();
 }

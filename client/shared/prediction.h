@@ -209,6 +209,7 @@ struct PredMap {
 	std::vector<PredSimEnt>    sim;
 	std::unordered_map<int, int> simByHammerId; // -1 where two entities share one
 	std::vector<PredAction>    actions;
+	std::vector<int>           actionTimes; // the fire limit of each action with one (PredAction::timesSlot)
 	std::vector<PredFilter>    filters;
 	std::vector<PredMpbhopsDoor> mpbhopsDoors;
 	std::vector<int>             doors; // sim indices of func_door and func_door_rotating
@@ -218,6 +219,7 @@ struct PredMap {
 		int active = 0;
 		int vsScripts = 0, vsMissing = 0, vsUnreadable = 0, vsFunctions = 0, vsUnsupported = 0;
 		int vsPredicted = 0, vsSkipped = 0;
+		bool overCap = false; // too many outputs: no triggers predicted (PRED_MAX_PAIRS)
 	} stats;
 	bool loaded = false;
 };

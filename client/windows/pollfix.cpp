@@ -3,10 +3,12 @@
 // kernel transition, and each cursor move also has win32k send WM_NCHITTEST and WM_SETCURSOR to the
 // window proc on the way out, so the loop retrieves tens of thousands of messages a second and runs
 // long past where it would otherwise be empty. Handling them cheaply doesn't help; not retrieving
-// them does. So, while the fix is on and the game is in front: the raw queue is read in one
-// GetRawInputBuffer batch at the start of each pump and WM_INPUT is never retrieved, the coalesced
-// WM_MOUSEMOVE and WM_NCMOUSEMOVE are taken at most once per pump (they carry the latest position),
-// and everything else comes through range-filtered peeks as before.
+// them does. So, while the fix is on, the game is in front and you're in game (no cursor): the raw
+// queue is read in one GetRawInputBuffer batch at the start of each pump and WM_INPUT is never
+// retrieved, the coalesced WM_MOUSEMOVE and WM_NCMOUSEMOVE are taken at most once per pump (they
+// carry the latest position), and everything else comes through range-filtered peeks as before.
+// Menus get the plain pump: filtered there, a click in a full-screen menu (paint, triggerlook) could
+// show the borderless window black for a frame on Windows (multithreaded rendering, first start).
 #include "pollfix.h"
 #include "utils.h"
 #include "settings.h"
@@ -15,10 +17,8 @@
 #include "Detours/src/detours.h"
 
 #include <intrin.h>
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 
 namespace pollfix {
 namespace {
@@ -35,25 +35,6 @@ HWND g_gameWindow;
 UINT g_shutdownMsg;  // sent by Shutdown, handled in OnWindowMessage
 MemRange g_callers[2];  // inputsystem.dll and engine.dll: only their pumps are filtered
 
-// Distinct PeekMessage shapes seen on the game thread, to know what the pump really looks like.
-struct Shape { HWND hwnd; UINT min, max, flags; const char* from; unsigned count; };
-
-struct Stats {
-	LONGLONG since;
-	unsigned pumps, filtered, slowPumps, calls;
-	LONGLONG inPeek, inPump, maxPump;
-	unsigned msgInput, msgMouseMove, msgNcMouseMove, msgMouseOther, msgKey, msgOther;
-	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
-	unsigned drains, rawReports;
-	unsigned noLegacyPumps, reregisters, postedButtons, emptyWheels;
-	unsigned offNotFront, offNoRaw, offCursor, offNoPump;
-	Shape shapes[8];
-	int shapeCount;
-};
-Stats g_s;
-std::vector<float> g_frametimes;  // ms between pump starts
-const size_t kMaxFrametimes = 32768;
-
 // A pump runs from the first call after one returned FALSE to the next FALSE.
 bool g_inPump;
 bool g_filtering;
@@ -64,7 +45,7 @@ bool g_updatedSinceFrame;  // a pump ran UpdateNoLegacy since the last OnFrame
 // No-legacy mode: the mouse registered with RIDEV_NOLEGACY while looking around, so Windows stops
 // making a WM_MOUSEMOVE (with its WM_NCHITTEST and WM_SETCURSOR) for every report. Filtering the
 // pump still leaves win32k doing that work per report; this is the only way to stop it. Part of
-// the high polling rate fix; bhoptools_nolegacy 0 turns just this half off, for comparing.
+// the high polling rate fix.
 bool g_noLegacyWanted = true;
 bool g_noLegacyOn;
 bool g_registerFailed;
@@ -98,7 +79,6 @@ void PostButton(UINT msg, WPARAM extra = 0)
 	GetCursorPos(&p);
 	ScreenToClient(g_gameWindow, &p);
 	PostMessageW(g_gameWindow, msg, g_buttonsDown | extra, MAKELPARAM(p.x, p.y));
-	g_s.postedButtons++;
 }
 
 void ReleaseButtons()
@@ -117,7 +97,8 @@ void ReleaseButtons()
 // What CInput::MouseMove checks. The Windows cursor misses chat, which only shows one after a cursor message.
 bool InGame()
 {
-	static void* surface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
+	static void* surface;  // looked up until it's there: the pump runs from before vguimatsurface loads
+	if (!surface) surface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
 	if (surface) return !VFunc<bool (*)(void*)>(surface, VT_Surface_IsCursorVisible)(surface);
 	CURSORINFO ci = { sizeof(ci) };
 	return GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
@@ -128,19 +109,8 @@ bool InGame()
 // buttons). pumpSeen false (no recognised pump lately) turns it off.
 void UpdateNoLegacy(bool pumpSeen)
 {
-	bool want = false;
-	if (!settings::Get().pollfix || !g_noLegacyWanted || !g_gameWindow) {
-	} else if (!pumpSeen) {
-		g_s.offNoPump++;
-	} else if (GetForegroundWindow() != g_gameWindow) {
-		g_s.offNotFront++;
-	} else if (!g_rawActive || !g_rawActive()) {
-		g_s.offNoRaw++;
-	} else if (!InGame()) {
-		g_s.offCursor++;
-	} else {
-		want = true;
-	}
+	const bool want = settings::Get().pollfix && g_noLegacyWanted && g_gameWindow && pumpSeen
+		&& GetForegroundWindow() == g_gameWindow && g_rawActive && g_rawActive() && InGame();
 	if (want == g_noLegacyOn) return;
 	RAWINPUTDEVICE d;
 	if (!FindMouseRegistration(d)) return;
@@ -155,11 +125,8 @@ void UpdateNoLegacy(bool pumpSeen)
 	}
 	g_registerFailed = false;
 	g_noLegacyOn = want;
-	g_s.reregisters++;
 	if (!want) ReleaseButtons();
 }
-
-double Ms(LONGLONG ticks) { return ticks * 1000.0 / g_freq; }
 
 const char* CallerName(const void* ret)
 {
@@ -169,87 +136,45 @@ const char* CallerName(const void* ret)
 	return nullptr;
 }
 
-void NoteShape(HWND hwnd, UINT min, UINT max, UINT flags, const char* from)
-{
-	for (int i = 0; i < g_s.shapeCount; ++i) {
-		Shape& s = g_s.shapes[i];
-		if (s.hwnd == hwnd && s.min == min && s.max == max && s.flags == flags && s.from == from) { s.count++; return; }
-	}
-	if (g_s.shapeCount < 8) g_s.shapes[g_s.shapeCount++] = { hwnd, min, max, flags, from, 1 };
-}
-
-void Count(const MSG& m)
-{
-	const UINT u = m.message;
-	if (u == WM_INPUT) g_s.msgInput++;
-	else if (u == WM_MOUSEMOVE) g_s.msgMouseMove++;
-	else if (u == WM_NCMOUSEMOVE) g_s.msgNcMouseMove++;
-	else if ((u >= WM_MOUSEFIRST && u <= WM_MOUSELAST) || (u >= WM_NCLBUTTONDOWN && u <= WM_NCXBUTTONDBLCLK)) g_s.msgMouseOther++;
-	else if (u >= WM_KEYFIRST && u <= WM_KEYLAST) g_s.msgKey++;
-	else g_s.msgOther++;
-}
-
-BOOL Peek(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT min, UINT max, UINT flags)
-{
-	const LONGLONG t0 = Now();
-	const BOOL r = fn(msg, hwnd, min, max, flags);
-	g_s.inPeek += Now() - t0;
-	g_s.calls++;
-	if (r) Count(*msg);
-	return r;
-}
-
 BOOL Pump(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT flags)
 {
 	if (!g_inPump) {
 		g_inPump = true;
-		const LONGLONG now = Now();
-		if (g_pumpStart && g_frametimes.size() < kMaxFrametimes)
-			g_frametimes.push_back((float)Ms(now - g_pumpStart));
-		g_pumpStart = now;
-		g_s.pumps++;
+		g_pumpStart = Now();
 		g_tookMouseMove = g_tookNcMouseMove = g_tookUnfiltered = false;
-		g_filtering = g_drain && settings::Get().pollfix && GetForegroundWindow() == g_gameWindow;
-		if (g_filtering) {
-			g_s.filtered++;
+		g_filtering = g_drain && settings::Get().pollfix && GetForegroundWindow() == g_gameWindow && InGame();
+		if (g_filtering)
 			g_drain();
-		}
 		// After the drain: what's queued arrived under the old registration and is handled by it.
 		UpdateNoLegacy(true);
 		g_updatedSinceFrame = true;
-		if (g_noLegacyOn) g_s.noLegacyPumps++;
 	}
 	BOOL r;
 	if (!g_filtering) {
-		r = Peek(fn, msg, hwnd, 0, 0, flags);
+		r = fn(msg, hwnd, 0, 0, flags);
 	} else {
 		// Everything but WM_NCMOUSEMOVE (0xA0), WM_INPUT (0xFF) and WM_MOUSEMOVE (0x200).
-		r = Peek(fn, msg, hwnd, 0, WM_NCMOUSEMOVE - 1, flags)
-			|| Peek(fn, msg, hwnd, WM_NCMOUSEMOVE + 1, WM_INPUT - 1, flags)
-			|| Peek(fn, msg, hwnd, WM_INPUT + 1, WM_MOUSEMOVE - 1, flags)
-			|| Peek(fn, msg, hwnd, WM_MOUSEMOVE + 1, 0xFFFFFFFF, flags);
+		r = fn(msg, hwnd, 0, WM_NCMOUSEMOVE - 1, flags)
+			|| fn(msg, hwnd, WM_NCMOUSEMOVE + 1, WM_INPUT - 1, flags)
+			|| fn(msg, hwnd, WM_INPUT + 1, WM_MOUSEMOVE - 1, flags)
+			|| fn(msg, hwnd, WM_MOUSEMOVE + 1, 0xFFFFFFFF, flags);
 		if (!r && !g_tookMouseMove) {
 			g_tookMouseMove = true;
-			r = Peek(fn, msg, hwnd, WM_MOUSEMOVE, WM_MOUSEMOVE, flags);
+			r = fn(msg, hwnd, WM_MOUSEMOVE, WM_MOUSEMOVE, flags);
 		}
 		if (!r && !g_tookNcMouseMove) {
 			g_tookNcMouseMove = true;
-			r = Peek(fn, msg, hwnd, WM_NCMOUSEMOVE, WM_NCMOUSEMOVE, flags);
+			r = fn(msg, hwnd, WM_NCMOUSEMOVE, WM_NCMOUSEMOVE, flags);
 		}
 		// Raw input the batch read didn't take (WM_INPUT_DEVICE_CHANGE arrives through the raw queue,
 		// and a ranged peek can't retrieve it): one plain peek per pump, so it reaches the engine.
 		if (!r && !g_tookUnfiltered && (HIWORD(GetQueueStatus(QS_RAWINPUT)) & QS_RAWINPUT)) {
 			g_tookUnfiltered = true;
-			r = Peek(fn, msg, hwnd, 0, 0, flags);
+			r = fn(msg, hwnd, 0, 0, flags);
 		}
 	}
-	if (!r) {
+	if (!r)
 		g_inPump = false;
-		const LONGLONG d = Now() - g_pumpStart;
-		g_s.inPump += d;
-		if (d > g_s.maxPump) g_s.maxPump = d;
-		if (d * 1000 > g_freq) g_s.slowPumps++;
-	}
 	return r;
 }
 
@@ -257,12 +182,10 @@ BOOL Hook(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT min, UINT max, UINT flags
 {
 	if (GetCurrentThreadId() != g_gameThread)
 		return fn(msg, hwnd, min, max, flags);
-	const char* from = CallerName(ret);
-	NoteShape(hwnd, min, max, flags, from);
-	const bool pump = from && min == 0 && max == 0 && (flags & ~PM_NOYIELD) == PM_REMOVE
+	const bool pump = CallerName(ret) && min == 0 && max == 0 && (flags & ~PM_NOYIELD) == PM_REMOVE
 		&& (hwnd == NULL || hwnd == g_gameWindow);
 	if (!pump)
-		return Peek(fn, msg, hwnd, min, max, flags);
+		return fn(msg, hwnd, min, max, flags);
 	return Pump(fn, msg, hwnd, flags);
 }
 
@@ -276,48 +199,6 @@ BOOL WINAPI Hooked_PeekMessageW(LPMSG msg, HWND hwnd, UINT min, UINT max, UINT f
 	return Hook(oPeekMessageW, msg, hwnd, min, max, flags, _ReturnAddress());
 }
 
-void Cmd_PumpStats(const CCommandX&)
-{
-	const LONGLONG now = Now();
-	const double secs = g_s.since ? (now - g_s.since) / (double)g_freq : 0.0;
-	if (secs <= 0.0 || !g_s.pumps) {
-		CoreLog("pump stats: nothing yet");
-		return;
-	}
-	double avg = 0.0, low1 = 0.0, worst = 0.0;
-	if (!g_frametimes.empty()) {
-		std::vector<float> sorted(g_frametimes);
-		std::sort(sorted.begin(), sorted.end());
-		for (float f : sorted) avg += f;
-		avg /= sorted.size();
-		low1 = sorted[sorted.size() * 99 / 100];
-		worst = sorted.back();
-	}
-	CoreLog("pump stats over %.1f s, high polling rate fix %s (%u of %u pumps filtered)",
-		secs, settings::Get().pollfix ? (g_drain ? "on" : "on but unavailable") : "off", g_s.filtered, g_s.pumps);
-	CoreLog("  %u pumps (%.0f/s); frametime avg %.2f ms, 1%% low %.2f ms (%.0f fps), worst %.2f ms",
-		g_s.pumps, g_s.pumps / secs, avg, low1, low1 > 0.0 ? 1000.0 / low1 : 0.0, worst);
-	CoreLog("  PeekMessage: %u calls (%.1f per pump), %.1f ms inside (%.1f%% of the time); pump loops %.1f ms (%.1f%%), %u over 1 ms, longest %.2f ms",
-		g_s.calls, g_s.calls / (double)g_s.pumps, Ms(g_s.inPeek), Ms(g_s.inPeek) / (secs * 10.0),
-		Ms(g_s.inPump), Ms(g_s.inPump) / (secs * 10.0), g_s.slowPumps, Ms(g_s.maxPump));
-	CoreLog("  retrieved: %u WM_INPUT, %u WM_MOUSEMOVE, %u WM_NCMOUSEMOVE, %u other mouse, %u keyboard, %u other",
-		g_s.msgInput, g_s.msgMouseMove, g_s.msgNcMouseMove, g_s.msgMouseOther, g_s.msgKey, g_s.msgOther);
-	CoreLog("  window proc: %u WM_INPUT, %u WM_MOUSEMOVE, %u WM_NCHITTEST, %u WM_SETCURSOR, %u other; raw: %u reports in %u batch reads",
-		g_s.procInput, g_s.procMouseMove, g_s.procHitTest, g_s.procSetCursor, g_s.procOther, g_s.rawReports, g_s.drains);
-	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted, %u empty wheel reports dropped",
-		g_noLegacyWanted && settings::Get().pollfix ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons, g_s.emptyWheels);
-	if (g_noLegacyWanted && settings::Get().pollfix)
-		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu or the console, %u no pump seen",
-			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor, g_s.offNoPump);
-	for (int i = 0; i < g_s.shapeCount; ++i) {
-		const Shape& s = g_s.shapes[i];
-		CoreLog("  PeekMessage(hwnd=%p, %u..%u, flags 0x%x) from %s: %u calls", s.hwnd, s.min, s.max, s.flags, s.from ? s.from : "elsewhere", s.count);
-	}
-	g_s = {};
-	g_s.since = now;
-	g_frametimes.clear();
-}
-
 void Cmd_PollFix(const CCommandX& c)
 {
 	if (c.argc > 1) {
@@ -327,13 +208,7 @@ void Cmd_PollFix(const CCommandX& c)
 	CoreLog("bhoptools_pollfix %d%s", settings::Get().pollfix ? 1 : 0, g_drain ? "" : " (unavailable, see the missing signature above)");
 }
 
-void Cmd_NoLegacy(const CCommandX& c)
-{
-	if (c.argc > 1) g_noLegacyWanted = atoi(c.argv[1]) != 0;
-	CoreLog("bhoptools_nolegacy %d (%s now)", g_noLegacyWanted ? 1 : 0, g_noLegacyOn ? "on" : "off");
-}
-
-ConCommandX g_cmds[3];
+ConCommandX g_cmds[1];
 
 }  // namespace
 
@@ -344,7 +219,6 @@ void Init(int (*drain)(), bool (*rawActive)())
 	LARGE_INTEGER f;
 	QueryPerformanceFrequency(&f);
 	g_freq = f.QuadPart;
-	g_frametimes.reserve(kMaxFrametimes);
 	g_shutdownMsg = RegisterWindowMessageW(L"bhoptools_pollfix_shutdown");
 	const char* modules[2] = { "inputsystem.dll", "engine.dll" };
 	for (int i = 0; i < 2; ++i) {
@@ -360,11 +234,10 @@ void Init(int (*drain)(), bool (*rawActive)())
 		CoreLog("high polling rate fix: PeekMessage not found, unavailable");
 		g_drain = nullptr;
 	} else if (!g_drain) {
-		CoreLog("high polling rate fix: unavailable (the raw input accumulators weren't found), only the pump counters run");
+		CoreLog("high polling rate fix: unavailable (the raw input accumulators weren't found)");
 	} else {
 		CoreLog("high polling rate fix: %s (Options > bhoptools, or bhoptools_pollfix 0/1)", settings::Get().pollfix ? "on" : "off");
 	}
-	g_s.since = Now();
 }
 
 void Attach()
@@ -398,11 +271,6 @@ bool OnWindowMessage(HWND hwnd, UINT msg)
 		UpdateNoLegacy(false);
 		return true;
 	}
-	if (msg == WM_INPUT) g_s.procInput++;
-	else if (msg == WM_MOUSEMOVE) g_s.procMouseMove++;
-	else if (msg == WM_NCHITTEST) g_s.procHitTest++;
-	else if (msg == WM_SETCURSOR) g_s.procSetCursor++;
-	else g_s.procOther++;
 	return false;
 }
 
@@ -421,7 +289,12 @@ void OnFrame()
 void OnRawMouse(const RAWMOUSE& m)
 {
 	if (!g_noLegacyOn || !m.usButtonFlags) return;
-	const USHORT f = m.usButtonFlags;
+	USHORT f = m.usButtonFlags;
+	// Raw input reports the physical buttons; Windows' "swap primary and secondary" only changes the messages.
+	if (GetSystemMetrics(SM_SWAPBUTTON)) {
+		const USHORT left = RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP, right = RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP;
+		f = (USHORT)((f & ~(left | right)) | (f & left) << 2 | (f & right) >> 2);
+	}
 	const struct { USHORT down, up; WPARAM mk; UINT msgDown, msgUp; WPARAM x; } buttons[] = {
 		{ RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, MK_LBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, 0 },
 		{ RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP, MK_RBUTTON, WM_RBUTTONDOWN, WM_RBUTTONUP, 0 },
@@ -434,22 +307,12 @@ void OnRawMouse(const RAWMOUSE& m)
 		if (f & b.up) { g_buttonsDown &= ~b.mk; PostButton(b.msgUp, b.x); }
 	}
 	// The engine reads an empty wheel report as wheel down.
-	if ((f & RI_MOUSE_WHEEL) && (SHORT)m.usButtonData == 0) {
-		g_s.emptyWheels++;
-	} else if (f & RI_MOUSE_WHEEL) {
+	if ((f & RI_MOUSE_WHEEL) && (SHORT)m.usButtonData != 0) {
 		// Wheel messages carry screen coordinates, unlike the buttons.
 		POINT p;
 		GetCursorPos(&p);
 		PostMessageW(g_gameWindow, WM_MOUSEWHEEL, MAKEWPARAM(g_buttonsDown, (SHORT)m.usButtonData), MAKELPARAM(p.x, p.y));
-		g_s.postedButtons++;
 	}
-}
-
-void CountRaw(int reports)
-{
-	if (reports <= 0) return;
-	g_s.drains++;
-	g_s.rawReports += reports;
 }
 
 void RegisterCommands()
@@ -461,11 +324,11 @@ void RegisterCommands()
 	void* echo = cvar ? VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "echo") : nullptr;
 	const char* echoName = echo ? static_cast<ConCommandX*>(echo)->name : nullptr;
 	if (!echo || !VFunc<bool (*)(void*)>(echo, VT_CCB_IsCommand)(echo) || !echoName || strcmp(echoName, "echo")) {
-		CoreLog("pollfix: couldn't register bhoptools_pumpstats and bhoptools_pollfix");
+		CoreLog("pollfix: couldn't register bhoptools_pollfix");
 		return;
 	}
 	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
-		{ "bhoptools_pollfix", "High polling rate fix: no legacy mouse messages in game, the message pump filtered in menus (0/1, on by default).", Cmd_PollFix },
+		{ "bhoptools_pollfix", "High polling rate fix: in game, no legacy mouse messages and a filtered message pump; menus are left alone (0/1, on by default).", Cmd_PollFix },
 	};
 	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];

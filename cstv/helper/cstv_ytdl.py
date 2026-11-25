@@ -128,6 +128,7 @@ def prefetch(url):
 def main():
     args = sys.argv[1:]
     try:
+        os.makedirs(os.path.dirname(CACHE), mode=0o700, exist_ok=True)   # else made with the umask's mode: cstvd refuses that
         os.makedirs(CACHE, mode=0o700, exist_ok=True)
     except OSError:
         return answer(args)

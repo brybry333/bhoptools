@@ -186,7 +186,7 @@ int Hooked_TryPlayerMove(void* self, float* firstDest, etrace::GameTraceX* first
 	char* gm = static_cast<char*>(self);
 	char* mv = *reinterpret_cast<char**>(gm + kGM_Mv);
 	const char* pl = g_player.pl;
-	if (!g_armed || !g_settings.known || self != g_gm || !mv || *reinterpret_cast<char**>(gm + kGM_Player) != pl)
+	if (!g_armed || self != g_gm || !mv || *reinterpret_cast<char**>(gm + kGM_Player) != pl)
 		return oTryPlayerMove(self, firstDest, firstTrace, slide);
 
 	MsfMove m;
@@ -375,8 +375,8 @@ void Arm(const Player* p)
 void SetSettings(const MsfSettings& s, bool log)
 {
 	const MsfSettings& o = g_settings;
-	if (s.known == o.known && (!s.known || (s.bumpcount == o.bumpcount && s.retrace == o.retrace
-			&& s.noclipWorkaround == o.noclipWorkaround && s.windowsServer == o.windowsServer && s.sourceJump == o.sourceJump)))
+	if (s.bumpcount == o.bumpcount && s.retrace == o.retrace && s.noclipWorkaround == o.noclipWorkaround
+			&& s.windowsServer == o.windowsServer)
 		return;
 	g_settings = s;
 	if (!log) return;
@@ -393,10 +393,8 @@ void* MoveHelper()
 void Describe(char* buf, size_t size)
 {
 	const MsfSettings& s = g_settings;
-	if (!s.known) snprintf(buf, size, "off (server has no momsurffix2)");
-	else snprintf(buf, size, "%sbumpcount %d, retrace length %g, noclip workaround %d%s%s", g_attached ? "" : "unavailable, server: ",
-		s.bumpcount, s.retrace, s.noclipWorkaround ? 1 : 0, s.windowsServer ? ", windows server" : "",
-		s.sourceJump ? ", bevel and disp fixes" : "");
+	snprintf(buf, size, "%sbumpcount %d, retrace length %g, noclip workaround %d%s, bevel and disp fixes", g_attached ? "" : "unavailable, server: ",
+		s.bumpcount, s.retrace, s.noclipWorkaround ? 1 : 0, s.windowsServer ? ", windows server" : "");
 }
 
 }

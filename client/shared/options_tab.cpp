@@ -15,10 +15,6 @@
 #include <cwchar>
 #include <vector>
 
-// paint's p2paint_server(): 1 = paint works here, 0 = it doesn't (an older p2paint on a server without its plugin;
-// p2paint 12+ paints everywhere, so never), -1 = can't tell / no paint
-// (linux/preload.cpp, windows/main.cpp)
-int PaintServerState();
 // opens a web page in the player's browser, off the game thread's way; url = a constant (it's read later on another
 // thread) (linux/preload.cpp, windows/main.cpp)
 void OpenUrl(const char* url);
@@ -54,7 +50,6 @@ typedef void   (*GetTextPosFn)(void*, int&, int&);
 
 const int FONTFLAG_ITALIC = 0x001;
 const int FONTFLAG_ANTIALIAS = 0x010;
-const int FONTFLAG_OUTLINE = 0x200;
 #ifdef _WIN32
 const char kFace[] = "Tahoma";
 #else
@@ -63,14 +58,10 @@ const char kFace[] = "DejaVu Sans";
 #endif
 const char kTitle[] = "bhoptools";
 
-int PaintGreyed() { return ::PaintServerState() == 0; }
-
 struct Row {
 	bool Settings::* value;
 	bool Settings::* also;
 	const wchar_t* name;
-	int (*greyed)() = nullptr;      // drawn greyed with a note while this says so (still clickable)
-	const wchar_t* note = nullptr;
 };
 const Row kRows[] = {
 	{ &Settings::rawinput,  nullptr,            L"rawinput2" },
@@ -82,7 +73,7 @@ const Row kRows[] = {
 	{ &Settings::curtimefix, nullptr,          L"curtimefix (smooth movement on old maps)" },
 	{ &Settings::cstv,      nullptr,            L"CS:TV (video screens)" },
 	{ &Settings::triggerlook, nullptr,          L"trigger menu (triggerlook)" },
-	{ &Settings::paint,     nullptr,            L"paint", PaintGreyed, L"  (no paint plugin on this server)" },
+	{ &Settings::paint,     nullptr,            L"paint" },
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 const int kLeft = 20, kTop = 20, kRowTall = 28, kBox = 14, kWidth = 560;
@@ -194,11 +185,7 @@ void Draw(VPANEL page)
 		if (i == hover) Rect(VT_Surface_DrawFilledRect, kLeft - 6, y - 4, kLeft + kWidth, y + kRowTall - 8, 255, 255, 255, 18);
 		Rect(VT_Surface_DrawOutlinedRect, kLeft, y + 2, kLeft + kBox, y + 2 + kBox, 200, 200, 200, 255);
 		if (s.*kRows[i].value) Rect(VT_Surface_DrawFilledRect, kLeft + 3, y + 5, kLeft + kBox - 3, y + kBox - 1, 255, 176, 0, 255);
-		if (kRows[i].greyed && kRows[i].greyed()) {
-			std::wstring t = std::wstring(kRows[i].name) + kRows[i].note;
-			Text(kLeft + kBox + 10, y, t.c_str(), 120, 120, 120);
-		} else
-			Text(kLeft + kBox + 10, y, kRows[i].name, 235, 235, 235);
+		Text(kLeft + kBox + 10, y, kRows[i].name, 235, 235, 235);
 	}
 
 	// Under the rows: "Update available (v1.2.3): check the GitHub", the last word a link (its end = where the text

@@ -229,12 +229,6 @@ bool plat_rename(const char *from, const char *to) { return MoveFileExA(from, to
 
 void plat_http_init() {}
 
-void *plat_module_symbol(const char *file, const char *symbol)
-{
-    HMODULE h = GetModuleHandleA(file);
-    return h ? (void *)GetProcAddress(h, symbol) : nullptr;
-}
-
 // WinHTTP, found at run time (only loaded when something is fetched)
 char *plat_http_get(const char *url, size_t *len, int *status)
 {
@@ -411,9 +405,11 @@ static bool on_raw_input(LPARAM lp)
             {RI_MOUSE_BUTTON_3_DOWN, RI_MOUSE_BUTTON_3_UP, 2}, {RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, 4},
             {RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, 5},
         };
+        bool swap = GetSystemMetrics(SM_SWAPBUTTON) != 0;   // raw data is the physical buttons: Windows' left-handed setting isn't in it
         for (auto &b : map) {
-            if (m.usButtonFlags & b.down) keep |= !send_button(b.button, true);
-            if (m.usButtonFlags & b.up) keep |= !send_button(b.button, false);
+            int button = swap && b.button == 1 ? 3 : swap && b.button == 3 ? 1 : b.button;
+            if (m.usButtonFlags & b.down) keep |= !send_button(button, true);
+            if (m.usButtonFlags & b.up) keep |= !send_button(button, false);
         }
         if (m.usButtonFlags & RI_MOUSE_WHEEL) keep |= !send_wheel((SHORT)m.usButtonData);
     }

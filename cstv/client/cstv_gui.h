@@ -2,6 +2,7 @@
 // renderers (togl and DXVK). Implemented in cstv_gui.cpp; the core (cstv_client.cpp) owns the
 // helper connection and calls into the GUI. All functions run on the game's main thread.
 #pragma once
+#include <string>
 
 // Core -> GUI
 bool gui_install();                       // once, after the game's interfaces are up; hooks paint + input
@@ -18,11 +19,10 @@ bool gui_in_lobby();                      // the hub says we're in a lobby (for 
 bool gui_hub_up();                        // cstvd is connected to cstv.xyz
 // The Progress Log (cstv_prog.inc): the same window with its own pages, fed by its backend on this PC
 // (cstv_proglocal.cpp; servers' progresslog plugins are ignored)
-void gui_prog_cmd(int argc, const char *const *argv, bool test);   // `prog_ui ...` typed or from a server: only test = `prog_ui_test`
+void gui_prog_cmd(int argc, const char *const *argv);   // `prog_ui_test ...` typed: the backend's lines plus the testing verbs
 void gui_prog_apply(int argc, const char *const *argv);           // the backend's `prog_ui ...` lines
 void gui_prog_open();
 void gui_prog_toggle();                     // `cstv_book`: opens or closes it
-void gui_prog_level_end();
 
 // The Progress Log's backend (cstv_proglocal.cpp): the log in files on this PC, runs followed in the game
 class IVEngineClient;
@@ -44,6 +44,8 @@ void cstv_helper_line(const char *line);  // send one line to cstvd (no trailing
 void cstv_print(const char *text);        // a CS:TV chat line for this player only
 void cstv_chat_line(const char *line);    // a chat line as it is (colour codes and all) for this player only
 void cstv_volume_preview(int vol);        // the volume slider while it's dragged (0-100; pref vol saves it)
+std::string b64encode(const std::string &in);              // base64url without padding, as cstvd and the hub use it
+bool b64decode(const std::string &in, std::string &out);   // false on anything else; "-" (the protocol's empty value) gives ""
 
 // Place mode: the core traces and draws the preview; the GUI swallows its keys and draws the hint bar.
 enum { PLACE_SIZE, PLACE_DIST, PLACE_FLOAT, PLACE_KIND, PLACE_CONFIRM, PLACE_CANCEL };

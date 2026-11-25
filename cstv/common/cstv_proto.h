@@ -1,21 +1,25 @@
-// cstv_proto.h — shared between the host helper (cstvd) and the game-side preload (libcstv.so).
+// cstv_proto.h — shared between the host helper (cstvd) and the game-side client (libcstv.so / cstv_client.dll).
 //
-// Frames: /tmp/cstv/frames, an mmap'ed file = struct cstv_shm. Three frame buffers so the helper
-// never writes the one the game is copying ("triple buffering"):
+// Frames: CSTV_SHM_PATH (Linux /tmp/cstv/frames), an mmap'ed file = struct cstv_shm. Three frame buffers so
+// the helper never writes the one the game is copying ("triple buffering"):
 //   helper: write into a buffer that is neither `latest` nor `reading`, then publish it as `latest`
 //           and bump `seq`.
 //   game:   idx = latest; reading = idx; if latest still == idx copy buf[idx]; reading = NONE.
-// Control: unix stream socket /tmp/cstv/ctl.sock, one line per command (game -> helper):
+// Control: unix stream socket CSTV_SOCK_PATH (Windows: 127.0.0.1:CSTV_TCP_PORT), one line per command (game -> helper):
 //   load <url base64url> <pos_ms> <paused 0|1> <running 0|1>   start playing (pos ignored for live streams)
 //   pause <0|1> <pos_ms>                         pause/unpause, re-syncing to pos
-//   sync <pos_ms> <running>                      periodic position from the master; helper seeks if off by >1.5 s
+//   sync <pos_ms> <running>                      periodic position from the hub; the helper corrects drift beyond
+//                                                the hub's tolerance (a little faster/slower within 1.5 s, else a seek)
 //   seek <pos_ms> / speed <x> / opt <name> <v> / info
 //   vol <0-100>                                  volume (the game derives it from the player's distance)
+//   view <0|1>                                   0: no CS:TV screen is in sight, the helper stops publishing frames
+//                                                (mpv keeps playing); 1 (the default for every new connection): publish
 //   stop                                         stop playback and audio
-//   ping                                         keepalive; the helper stops if none arrives for 3 s
-//   ident, m <master line>, search, pref, stream start|stop   (notes/PROTOCOL.md)
-// helper -> game: srv <master line>, master 0|1, pref, result/results_end, stream_state, chat 0|1.
-// The helper holds the connection to the master server (notes/PROTOCOL.md) and reports started/ended/title itself.
+//   ping                                         keepalive; the helper stops playback if no line arrives for 3 s
+//   ident, m <hub line>, pref, pscreen, lchat, xchat, stream start|stop   (../PROTOCOL.md)
+// helper -> game: srv <hub line>, master 0|1, pref, pscreen, stream_state, capture 0|1, chat 0|1|2, chatavail 0|1,
+//   lchat_pick, lchat_gifpick (../PROTOCOL.md).
+// The helper holds the connection to the hub (../PROTOCOL.md) and reports started/ended/title itself.
 // /tmp is shared between the host and Steam's game container, so both sides see the same files.
 #pragma once
 #include <stddef.h>
@@ -28,9 +32,17 @@
 #define CSTV_TCP_PORT   27961
 #define CSTV_SHM_PATH   "Local\\cstv_frames_v2"
 #else
+#include <sys/stat.h>
+#include <unistd.h>
 #define CSTV_DIR        "/tmp/cstv"
 #define CSTV_SHM_PATH   "/tmp/cstv/frames"
 #define CSTV_SOCK_PATH  "/tmp/cstv/ctl.sock"
+// 1 if CSTV_DIR is this user's alone: in /tmp anyone could have made it first, with links or a fake socket in it
+static inline int cstv_run_dir_ok(void)
+{
+    struct stat st;
+    return !lstat(CSTV_DIR, &st) && S_ISDIR(st.st_mode) && st.st_uid == getuid() && !(st.st_mode & 022);
+}
 #endif
 #define CSTV_MAGIC      0x56545343u   /* "CSTV" */
 #define CSTV_VERSION    2u    /* 2: 1920x1080 (1: 1280x720) */

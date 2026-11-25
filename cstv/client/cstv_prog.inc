@@ -21,7 +21,7 @@
 // From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin>
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
 //                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin>
-//                   prog_ui done | open | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
+//                   prog_ui done | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | set autofinish|saveat|bin <n>
 // Included into cstv_gui.cpp (its fonts, input and primitives).
@@ -44,6 +44,7 @@ static struct {
     bool att = false;             // the attempt being played (while the book is open)
     std::string att_from;
     float att_ft = -1, att_now = -1, att_fail = -1;
+    std::vector<std::pair<std::string, long>> practised;   // per day: seconds out of the start zone with the run timer going
 } pg;
 
 enum { PV_LOG, PV_GRAPH, PV_SPOTS, PV_COUNT };   // what the book is open at: page 1, pages 2 | 3, pages 4 | 5
@@ -242,11 +243,24 @@ static PRegion p_region(float t)
 struct PStats {
     int tries = 0, starts = 0, fails = 0, days = 0;
     float best = -1, avg = -1;
-    long secs = 0;                                  // first to last entry, each day
+    long secs = 0;                                  // time practising (days from before it was kept: first to last entry)
     std::vector<std::pair<PRegion, int>> where;     // the places runs from Start died at, most first
     PRegion dead; int dead_n = 0, dead_of = 0;      // the highest share of runs that got there and died there
     std::string prac; int prac_n = 0;               // the most practised start (not Start)
 };
+
+// time practising as the log kept it (a day, or "" = every day); days from before it was kept have none
+static bool p_practised_kept(const std::string &day)
+{
+    for (auto &p : pg.practised) if (p.first == day) return true;
+    return false;
+}
+static long p_practised(const std::string &day)
+{
+    long n = 0;
+    for (auto &p : pg.practised) if (day.empty() || p.first == day) n += p.second;
+    return n;
+}
 
 static PStats p_stats(const std::vector<const PEntry *> &v)
 {
@@ -278,7 +292,8 @@ static PStats p_stats(const std::vector<const PEntry *> &v)
     }
     if (s.starts) s.avg = sum / s.starts;
     s.days = (int)span.size();
-    for (auto &d : span) s.secs += d.second.second - d.second.first;
+    for (auto &d : span)
+        if (!p_practised_kept(d.first)) s.secs += d.second.second - d.second.first;
     std::stable_sort(s.where.begin(), s.where.end(), [](const std::pair<PRegion, int> &a, const std::pair<PRegion, int> &b) { return a.second > b.second; });
     for (auto &w : s.where) {
         int got = 0;
@@ -304,7 +319,6 @@ static std::vector<const PEntry *> p_day_entries(const std::string &day)   // ""
 }
 
 // ---- from the backend
-void gui_prog_open();
 static void p_view(int v, bool sound = true);
 static void p_focus(int id);
 static void p_ask(const std::string &title, const std::string &sub, std::function<void()> yes);
@@ -313,11 +327,8 @@ static void p_ask_close(bool yes);
 static void p_apply(int argc, const char *const *argv, bool test);
 void gui_prog_apply(int argc, const char *const *argv) { p_apply(argc, argv, false); }
 
-// `prog_ui ...` from the console or a server: a server's progresslog plugin is ignored (the log is on this PC now)
-void gui_prog_cmd(int argc, const char *const *argv, bool test)
-{
-    if (test) p_apply(argc, argv, true);
-}
+// `prog_ui_test ...` (console only): the backend's lines plus the testing verbs
+void gui_prog_cmd(int argc, const char *const *argv) { p_apply(argc, argv, true); }
 
 static void p_apply(int argc, const char *const *argv, bool test)
 {
@@ -330,7 +341,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
     if (v == "reset" && argc >= 7) {
         pg.map = A(2); pg.today = A(3); pg.daystart = I(4); pg.autofinish = I(5) != 0; pg.saveat_here = I(6) != 0;
         if (argc >= 8 && I(7) >= 5) pg.bin = I(7);
-        pg.e.clear(); pg.spots.clear(); pg.end = -1;
+        pg.e.clear(); pg.spots.clear(); pg.end = -1; pg.practised.clear();
         pg.synced = false; pg.have = true; pg.version++;
         g_psel = 0; g_pday.clear(); g_pg_a = g_pg_b = -1;
     } else if (v == "e" && argc >= 10) {
@@ -340,6 +351,12 @@ static void p_apply(int argc, const char *const *argv, bool test)
         else pg.e.insert(it, n);
         if (g_psel == n.id) { g_pe_from = n.from; g_pe_to = n.to; }
         pg.version++;
+    } else if (v == "t" && argc >= 4) {
+        std::string d = A(2);
+        long n = std::max(0L, atol(argv[3]));
+        auto it = std::find_if(pg.practised.begin(), pg.practised.end(), [&](const std::pair<std::string, long> &p) { return p.first == d; });
+        if (it != pg.practised.end()) it->second = n;
+        else if (!d.empty() && pg.practised.size() < 10000) pg.practised.push_back({d, n});
     } else if (v == "d" && argc >= 3) {
         int id = I(2);
         pg.e.erase(std::remove_if(pg.e.begin(), pg.e.end(), [id](const PEntry &e) { return e.id == id; }), pg.e.end());
@@ -359,7 +376,6 @@ static void p_apply(int argc, const char *const *argv, bool test)
         pg.autofinish = I(2) != 0; pg.saveat_here = I(3) != 0; pg.daystart = I(4); pg.today = A(5);
         if (argc >= 7 && I(6) >= 5 && I(6) != pg.bin) { pg.bin = I(6); pg.version++; }
     } else if (v == "done") pg.synced = true;
-    else if (v == "open") gui_prog_open();
     else if (v == "msg" && argc >= 3) toast(A(2));
     else if (v == "attempt" && argc >= 7) {
         pg.att = I(2) != 0; pg.att_from = A(3); pg.att_ft = F(4); pg.att_now = F(5); pg.att_fail = F(6);
@@ -402,8 +418,6 @@ void gui_prog_toggle()
     if (g_open && g_mode == MODE_PROG) { close_window(); return; }
     gui_prog_open();
 }
-
-void gui_prog_level_end() {}
 
 // ---------------------------------------------------------------- Minecraft's pictures
 // progbook.bin (cstv/mcassets.py): "PBK1", a count, then (name[32], u16 w, u16 h, u32 offset) each, then RGBA pixels
@@ -645,6 +659,7 @@ static void p_nav(int id, int x, int y, int w, int h) { g_pnav.push_back({id, x,
 static bool p_chrome(int id) { return id >= PB_DONE && id < PB_TAB + PV_COUNT; }   // the book's own: Done, arrows, tabs
 static bool p_is_input(int id) { return id >= 900 && id < 1000; }
 static void p_focus(int id) { g_focus = id; g_pall = p_is_input(id) ? id : 0; }
+static bool prog_typing() { return p_is_input(g_focus); }
 
 // on to the nearest control that way (one beside it on its line before one further down)
 static bool p_nav_go(int dx, int dy)
@@ -1102,10 +1117,11 @@ static void p_entry_form(int x, int y, int w)
         cx += BT(44);
         if (p_button(PB_CANCEL, cx, y, 42, "Cancel")) { g_psel = 0; g_focus = 0; return; }
         if (go) {
-            std::string f = p_clean(g_pe_from), t = p_clean(g_pe_to);
-            if (!f.empty() && f != e->from) p_send("sm_progui edit %d from \"%s\"", e->id, f.c_str());
-            if (!t.empty() && t != e->to) p_send("sm_progui edit %d to \"%s\"", e->id, t.c_str());
-            g_focus = PR_ENTRY + e->id;   // back to its row
+            int id = e->id;   // (p_send changes pg.e: e isn't used after it)
+            std::string f = p_clean(g_pe_from), t = p_clean(g_pe_to), was_to = e->to;
+            if (!f.empty() && f != e->from) p_send("sm_progui edit %d from \"%s\"", id, f.c_str());
+            if (!t.empty() && t != was_to) p_send("sm_progui edit %d to \"%s\"", id, t.c_str());
+            g_focus = PR_ENTRY + id;   // back to its row
             g_psel = 0;
         }
     } else {
@@ -1156,6 +1172,7 @@ static void p_page_log(int x, int y, int w, int h)
     } else mt(F_MC, x, y, M_FAINT, "nothing logged this day");
     y += BT(14);
     p_entry_form(x, y, w);
+    list = p_day_entries(day);   // the form saves at once: an added attempt can move pg.e in memory
     y += BT(28);
 
     // the bars, newest on top (the attempt being played first)
@@ -1495,6 +1512,8 @@ static void p_page_stats(int x, int y, int w, int h)
     p_head(x, y, w, "Stats", 3);
     y += BT(18);
     PStats td = p_stats(p_day_entries(pg.today)), all = p_stats(p_day_entries(""));
+    td.secs += p_practised(pg.today);
+    all.secs += p_practised("");
     int c1 = x + BT(84), c2 = x + BT(84) + (w - BT(84)) / 2, cw = (w - BT(84)) / 2 - BT(4);
     mt(F_MCB, c1, y, M_DIM, "today");
     mt(F_MCB, c2, y, M_DIM, "all time");

@@ -36,7 +36,7 @@ if host systemctl --user is-active -q cstvd.socket 2>/dev/null; then
     :   # socket activation: the game's connection starts the helper, and it quits by itself
 elif [[ -n $SERVICE ]] && host systemctl --user cat "$SERVICE" >/dev/null 2>&1; then
     if host systemctl --user start "$SERVICE"; then own=service; else say "could not start $SERVICE"; fi
-elif pgrep -x cstvd >/dev/null; then
+elif pgrep -u "$UID" -x cstvd >/dev/null; then
     say "a cstvd is already running, using that one"
 elif [[ -x $HELPER ]]; then
     mkdir -p "$HOME/.cache/cstv"

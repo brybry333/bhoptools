@@ -7,18 +7,19 @@ Started by cstvd when needed. Commands arrive on stdin, one JSON object per line
   {"cmd": "youtube", "url": "<link>"}       the same for a youtube.com/@channel/live link (id looked up)
   {"cmd": "info", "login": "lofigirl"}      show the info card for 10 s
   {"cmd": "quit"}
-Outputs (layouts in ../common/cstv_proto.h):
-  /tmp/cstv/chat   chat panel 512x768 BGRX, triple-buffered; the game shows it on the panel beside the TV
-  /tmp/cstv/card   info card 1080x315 RGBA; cstvd blends it into the video while it is visible
-  /tmp/cstv/lchat  the lobby chat for the game's Lobby page (and its emote / GIF pickers), RGBA at the size the
-                   game asks for (LobbyChat below); clicks in the pickers answer on stdout
-  (Windows: the named mappings Local\\cstv_chat_v1 / Local\\cstv_card_v1)
+Outputs (layouts in ../common/cstv_proto.h), in /tmp/cstv:
+  chat    chat panel 512x768 BGRX, triple-buffered; the game shows it on the panel beside the TV
+  card    info card 1080x315 RGBA; cstvd blends it into the video while it is visible
+  lchat   the lobby chat for the game's Lobby page (and its emote / GIF pickers), RGBA at the size the
+          game asks for (LobbyChat below); clicks in the pickers answer on stdout
+  (Windows: the named mappings Local\\cstv_chat_v1 / Local\\cstv_card_v1 / Local\\cstv_lchat_v1)
 
 Chat is read anonymously (justinfan) from Twitch IRC. Emotes: Twitch, BTTV and 7TV (global and the
 channel's), animated ones animate. YouTube live chat is polled anonymously from YouTube's own web
 endpoint (live_chat page -> youtubei get_live_chat, "Live chat" view = all messages); YouTube has no
 BTTV/7TV, so its emoji are YouTube's: standard ones from the color emoji font, channel/member emotes as
-images. Images live in memory only; nothing is written to disk.
+images. On disk: ~/.cache/cstv/emotes (Windows %LOCALAPPDATA%\\cstv\\emotes) keeps channels' emote lists and the
+emote image files (images not fetched again in 30 days are deleted at start); the rest stays in memory.
 
 Test without the game:  cstv_overlay.py --test <login> <seconds> <out_prefix>
                         cstv_overlay.py --test yt:<video id> <seconds> <out_prefix>
@@ -81,7 +82,9 @@ if WINDOWS:   # the Windows build carries its fonts
 else:
     FONT = "/usr/share/fonts/noto/NotoSans-Regular.ttf"
     FONT_BOLD = "/usr/share/fonts/noto/NotoSans-Bold.ttf"
-    FONT_EMOJI = "/usr/share/fonts/noto/NotoColorEmoji.ttf"
+    FONT_EMOJI = next((p for p in ("/usr/share/fonts/noto/NotoColorEmoji.ttf", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                                   os.path.join(HERE, "fonts", "NotoColorEmoji.ttf")) if os.path.exists(p)),
+                      "/usr/share/fonts/noto/NotoColorEmoji.ttf")   # Arch, Debian/Ubuntu, next to us
     if not os.path.exists(FONT):   # other distros keep Noto elsewhere: the Roboto Mono we ship
         FONT, FONT_BOLD = (os.path.join(HERE, "fonts", n) for n in ("RobotoMono-Regular.ttf", "RobotoMono-Bold.ttf"))
 NAME_COLORS = [(255, 0, 0), (0, 0, 255), (0, 128, 0), (178, 34, 34), (255, 127, 80), (154, 205, 50), (255, 69, 0),
@@ -114,7 +117,7 @@ def http_json(url, **kw):
 def open_shm(path, size):
     if WINDOWS:
         return mmap.mmap(-1, size, tagname=path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)   # cstvd refuses a folder others may write to
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     os.ftruncate(fd, size)
     m = mmap.mmap(fd, size)
@@ -184,6 +187,21 @@ class Emote:
 
 EMOTE_CACHE = os.path.join(os.environ.get("LOCALAPPDATA") if WINDOWS and os.environ.get("LOCALAPPDATA")
                            else os.path.expanduser("~/.cache"), "cstv", "emotes")   # channel emote NAMES only
+
+
+def prune_emote_cache(days=30):
+    """Delete emote images fetched more than `days` days ago (the folder would only ever grow)."""
+    old = time.time() - days * 86400
+    try:
+        with os.scandir(os.path.join(EMOTE_CACHE, "img")) as it:
+            for e in it:
+                try:
+                    if e.is_file(follow_symlinks=False) and e.stat(follow_symlinks=False).st_mtime < old:
+                        os.remove(e.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 class Emotes:
@@ -1008,6 +1026,7 @@ LC_ROW, LC_ACCENT = (23, 23, 23), (74, 143, 240)
 LC_FONT, LC_FONT_BOLD = (os.path.join(HERE, "fonts", n) for n in ("RobotoMono-Regular.ttf", "RobotoMono-Bold.ttf"))
 if not os.path.exists(LC_FONT):
     LC_FONT, LC_FONT_BOLD = FONT, FONT_BOLD
+MEDIA_BYTES = 160 << 20         # decoded GIF frames the Lobby page keeps (by count, 60 picker GIFs once took 1.6 GB)
 
 
 def b64url(s):
@@ -1061,7 +1080,8 @@ class LobbyChat:
         self.content_h = 0
         self.search = ""
         self.gifs, self.gif_q, self.gif_next, self.gif_asked = [], None, None, None
-        self.media = {}            # (url, w, h) -> Emote (animated frames) or None
+        self.media = {}            # (url, w, h) -> Emote (animated frames) or None, least recently used first
+        self.media_bytes = 0       # decoded size of the Emotes in self.media
         self.hits = []             # (x0, y0, x1, y1, kind, value) in the last picker frame
         self.channel = None
         self.draft, self.draft_laid = "", None   # the message being written (shown with its emotes)
@@ -1194,10 +1214,9 @@ class LobbyChat:
                         self.set_scale(sc)
                         self.emotes.height = self.emote_h
                         self.emotes.cache = {}
-                    self.media = {}
                     self.dirty = True
-                    if rescale:
-                        self.laid = {}
+                    if rescale:   # new sizes for every GIF: what is decoded at the old ones goes
+                        self.media, self.media_bytes, self.laid = {}, 0, {}
                         self.relayout()
             elif v == "show" and len(w) >= 2:
                 self.shown = w[1] == "1"
@@ -1243,7 +1262,7 @@ class LobbyChat:
                         break
 
     # --- laying out
-    def _media(self, url, w, h):
+    def _media(self, url, w, h, max_frames=80):
         """An image or GIF at url, scaled to fit w x h (animated frames kept); cached; None while loading/failed."""
         key = (url, w, h)
         with self.lock:
@@ -1251,13 +1270,11 @@ class LobbyChat:
                 self.media[key] = self.media.pop(key)   # most recently used last
                 return self.media[key]
             self.media[key] = None
-            if len(self.media) > 60:   # a picker GIF is 13-26 MB of frames: drop the least recently used
-                self.media.pop(next(iter(self.media)))
         def load():
             em = None
             try:
                 im = Image.open(io.BytesIO(http_get(url, timeout=12)))
-                n = min(getattr(im, "n_frames", 1), 80)
+                n = min(getattr(im, "n_frames", 1), max_frames)
                 frames, durs = [], []
                 for i in range(n):
                     im.seek(i)
@@ -1269,13 +1286,34 @@ class LobbyChat:
             except Exception as ex:
                 log("lobby chat image", url, ex)
             with self.lock:
-                if key in self.media:
+                if key in self.media and self.media[key] is None:   # (not when a second load of it got here first)
                     self.media[key] = em
+                    if em:
+                        self.media_bytes += self._em_bytes(em)
+                        self._media_trim(key)
                     self.dirty = True
                     if self.mode == "chat":
                         self.relayout(lambda m: m.get("gif") == url)
         self.pool.submit(load)
         return None
+
+    @staticmethod
+    def _em_bytes(em):
+        return 4 * sum(f.width * f.height for f in em.frames)
+
+    def _media_trim(self, keep):
+        """Drop least recently used GIFs (not `keep`) until MEDIA_BYTES fits; a chat message showing one (laid holds
+        the same Emote) keeps its first frame only, so the memory really goes. Call with self.lock held."""
+        for k in list(self.media):
+            if self.media_bytes <= MEDIA_BYTES:
+                break
+            if k == keep:
+                continue
+            em = self.media.pop(k)
+            if em:
+                self.media_bytes -= self._em_bytes(em)
+                # shortcut: that chat GIF stays still until the chat is laid out again, reload it when drawn if anyone minds
+                em.frames, em.durations = em.frames[:1], em.durations[:1]
 
     def _layout_job(self, m):
         try:
@@ -1452,7 +1490,7 @@ class LobbyChat:
                 for x, ey, em in moving:
                     fr = em.frame_at(t_ms)
                     panel.paste(fr, (x, y + ey), fr)
-                    anim = True
+                    anim = anim or em.animated   # a GIF cut to its first frame (_media_trim) no longer moves
             y -= self.gap
         if not any(items):
             ImageDraw.Draw(panel).text((pad, pad), "No messages yet", font=self.txt.font, fill=LC_FAINT)
@@ -1512,7 +1550,7 @@ class LobbyChat:
             tall[i] += h + gap
             if y + h < 0 or y > H:
                 continue
-            em = self._media(url, colw, h)
+            em = self._media(url, colw, h, 30)   # a preview: its first 30 frames
             if em:
                 fr = em.frame_at(t_ms)
                 panel.paste(fr, (x, y), fr)
@@ -1691,6 +1729,7 @@ def main():
         bg.save(prefix + "_card.png")
         log(f"test: {len(r.msgs)} messages, {len(r.emotes.codes)} emote codes, animated on screen: {anim}")
         return
+    threading.Thread(target=prune_emote_cache, daemon=True).start()
     r = Renderer()
     threading.Thread(target=stdin_loop, args=(r,), daemon=True).start()
     r.run()

@@ -146,20 +146,13 @@ typedef int  (*SDL_EventFilter)(void* userdata, SDL_Event* event);
 typedef void (*SDL_AddEventWatch_t)(SDL_EventFilter, void*);
 typedef void (*SDL_PumpEvents_t)(void);
 typedef int  (*SDL_GetRelativeMouseMode_t)(void);
-typedef uint32_t (*SDL_GetMouseState_t)(int*, int*);
 typedef int  (*SDL_PollEvent_t)(SDL_Event*);
 typedef int  (*SDL_PeepEvents_t)(SDL_Event*, int, int action, uint32_t minType, uint32_t maxType);
 
 static SDL_PumpEvents_t           g_SDLPumpEvents = nullptr;
 static SDL_GetRelativeMouseMode_t g_SDLGetRelativeMouseMode = nullptr;
-static SDL_GetMouseState_t        g_SDLGetMouseState = nullptr;
 static SDL_PollEvent_t            g_SDLPollEvent = nullptr;
 static SDL_PeepEvents_t           g_SDLPeepEvents = nullptr;
-
-bool LeftMouseDown()
-{
-	return g_SDLGetMouseState && (g_SDLGetMouseState(nullptr, nullptr) & 1) != 0;
-}
 
 // CSDLMgr only uses SDL relative mode with m_rawinput 1 and the cursor hidden. Otherwise it
 // warps the cursor back to centre, so summing xrel would cancel each move; use the engine's deltas.
@@ -647,8 +640,6 @@ static void LoadTriggerlook()
 // copy already runs (its own libp2paint.so preload): that copy is left alone, and the Options switch can't reach it.
 typedef void (*P2paintEnable_t)(bool);
 static P2paintEnable_t g_p2paintEnable;
-static int (*g_p2paintServer)();
-int PaintServerState() { return g_p2paintServer ? g_p2paintServer() : -1; }
 static void LoadP2paint()
 {
 	Dl_info info;
@@ -667,9 +658,7 @@ static void LoadP2paint()
 	if (!start()) {
 		CoreLog("paint: another copy already runs (libp2paint.so in the launch options?): the Options switch can't reach it");
 		g_p2paintEnable = nullptr;
-		return;
 	}
-	g_p2paintServer = (int (*)())dlsym(h, "p2paint_server");
 }
 
 // The main thread is never inside a patched function while it pumps SDL events.
@@ -713,7 +702,6 @@ static void InstallCodeHooks()
 		if (g_p2paintEnable) g_p2paintEnable(s.paint);
 	});
 	core::SyncPredict();
-	LoadCurtimefix();
 	FindCstv();
 	LoadTriggerlook();
 	LoadP2paint();
@@ -968,7 +956,6 @@ static SDL_AddEventWatch_t ResolveSDLAddEventWatch()
 	if (!g_SDLPumpEvents) g_SDLPumpEvents = (SDL_PumpEvents_t)dlsym(h, "SDL_PumpEvents");
 	if (!g_SDLGetRelativeMouseMode)
 		g_SDLGetRelativeMouseMode = (SDL_GetRelativeMouseMode_t)dlsym(h, "SDL_GetRelativeMouseMode");
-	if (!g_SDLGetMouseState) g_SDLGetMouseState = (SDL_GetMouseState_t)dlsym(h, "SDL_GetMouseState");
 	if (!g_SDLPollEvent) g_SDLPollEvent = (SDL_PollEvent_t)dlsym(h, "SDL_PollEvent");
 	if (!g_SDLPeepEvents) g_SDLPeepEvents = (SDL_PeepEvents_t)dlsym(h, "SDL_PeepEvents");
 	SDL_AddEventWatch_t fn = (SDL_AddEventWatch_t)dlsym(h, "SDL_AddEventWatch");
@@ -1084,9 +1071,8 @@ static void* InstallerThread(void* /*arg*/)
 	auto clientSegs = FindExecSegments("client.so");
 	if (!clientSegs.empty())
 		if (void* h = dlopen(clientSegs[0].path.c_str(), RTLD_LAZY | RTLD_NOLOAD)) dlclose(h);
-	// Static tables only, so no polling. The flag below publishes these and the settings.
+	// Static tables only, so no polling. The flag below publishes these (the settings are loaded in the constructor).
 	cp::ResolveOffsets();
-	settings::Load();
 	g_viewpunchRemoved = settings::Get().viewpunch;
 	__atomic_store_n(&g_installPending, true, __ATOMIC_RELEASE);
 	addEventWatch(Bhoptools_SDLWatch, nullptr);
@@ -1145,6 +1131,10 @@ static void bhoptools_ctor()
 			keylists::Write(std::string(exe) + "/cstrike/");
 		}
 	}
+	// Here, not after the installer's waits: a game update that breaks one of our patterns doesn't stop curtimefix,
+	// and curtimefix's constructor sets an environment variable while nothing else can be reading it.
+	settings::Load();
+	LoadCurtimefix();
 
 	StartDetached(InstallerThread, nullptr);
 }

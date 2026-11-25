@@ -27,9 +27,6 @@
 #include <sys/prctl.h>
 #endif
 
-// yt-dlp format for a height cap; see yt_format_for()
-#define YT_FORMAT(h) "bv*[height<=" #h "][protocol=https][format_id!*=-sr]+ba[protocol=https]/bv*[height<=" #h "]+ba/b[height<=" #h "]/bv*+ba/b"
-
 #define exe_dir os_exe_dir   // where cstvd lives (cstv_overlay.py and cstv_ytdl.py sit next to it)
 
 // the programs cstvd runs: Linux finds them in PATH, the Windows build carries them next to cstvd.exe
@@ -443,6 +440,10 @@ static void compose_screen(uint8_t *rgba, int mode, int dots)
     draw_text(rgba, &font_bold, mpx, CSTV_W - UI(40) - text_width(&font_bold, mpx, "CS:TV"), CSTV_H - UI(34), "CS:TV", faint);
 }
 
+// the game's "view 0|1": 0 = no CS:TV screen is in sight, so frames aren't compressed and published (mpv keeps
+// playing). 1 for every new connection (a client that never says keeps getting every frame).
+static atomic_int game_view = 1;
+
 static void *render_thread(void *p)
 {
     (void)p;
@@ -459,7 +460,7 @@ static void *render_thread(void *p)
         {MPV_RENDER_PARAM_SW_POINTER, rgba},
         {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block},
         {0}};
-    int card_was = 0;
+    int card_was = 0, view_was = 1;
     for (;;) {
         pthread_mutex_lock(&upd_mu);
         if (!upd_flag) {   // wake at least every 100 ms so the card can appear/disappear while paused
@@ -484,10 +485,12 @@ static void *render_thread(void *p)
         }
         int cv = card_visible(), tv = toast_visible(), ov = cv || tv;   // something drawn over the picture
         int mode = screen_mode;
+        int view = game_view, back = view && !view_was;   // back in sight: publish the current picture once
+        view_was = view;
         if (mode != SCR_VIDEO) {
             static int last_mode = -1, last_dots = -1, last_gen = -1;
             int dots = mode == SCR_LOADING ? (int)((now_ns() / 400000000ull) % 4) : 0;
-            if (mode != last_mode || dots != last_dots || screen_gen != last_gen || ov || card_was) {
+            if (view && (mode != last_mode || dots != last_dots || screen_gen != last_gen || ov || card_was || back)) {
                 last_mode = mode;
                 last_dots = dots;
                 last_gen = screen_gen;
@@ -499,7 +502,7 @@ static void *render_thread(void *p)
             card_was = ov;
             continue;
         }
-        if (have_frame && (fresh || ov || card_was)) {
+        if (view && have_frame && (fresh || ov || card_was || back)) {
             if (ov) {
                 memcpy(out, rgba, sizeof out);
                 if (cv) blend_card(out);
@@ -529,7 +532,6 @@ static int init_mpv(void)
         {"demuxer-max-bytes", "64MiB"},
         {"demuxer-max-back-bytes", "16MiB"},
         {"ytdl", "yes"},
-        {"ytdl-format", YT_FORMAT(1440)},
         {"rtsp-transport", "tcp"},            // CS:TV streams (the relay's RTSP is TCP only)
         {"ytdl-raw-options", "no-cache-dir=,sub-langs=en.*,write-subs=,write-auto-subs="},
         // every quality becomes its own (lazily opened) track, so a quality change is a track switch
@@ -626,7 +628,7 @@ static void yt_format_for(int h, char *out, size_t n)
     else
         snprintf(out, n, "bv*[protocol=https][format_id!*=-sr]+ba[protocol=https]/bv*+ba/b");
 }
-static char opt_yt_format[256] = YT_FORMAT(1440);
+static char opt_yt_format[256];   // set by main's apply_opt("quality"), before anything loads
 static double cur_speed = 1.0;
 
 // ---- cstv_overlay.py (Twitch chat panel + info card + the Lobby page's chat), started when first needed.
@@ -833,11 +835,28 @@ static int relay_start(int fd, char *url, size_t n)
 #endif
 
 // ---- lines back to the game (srv lines from the master can be long: a whole queue)
+// What the socket doesn't take at once (the game busy loading a map) waits in game_out and goes first, so a line is
+// never cut in two. Over GAME_OUT_MAX waiting, the main loop drops the connection: the game reconnects and gets
+// everything again.
+#define GAME_OUT_MAX (1u << 20)
 static sock_t game_fd = SOCK_BAD;
+static char *game_out;
+static size_t game_outlen;
+static int game_overflow;
+
+static void game_flush(void)
+{
+    while (game_outlen && game_fd != SOCK_BAD) {
+        int w = (int)send(game_fd, game_out, (int)game_outlen, SOCK_SEND_FLAGS);
+        if (w <= 0) return;   // full (or gone: the main loop's recv finds out)
+        memmove(game_out, game_out + w, game_outlen - (size_t)w);
+        game_outlen -= (size_t)w;
+    }
+}
 
 static void game_send(const char *fmt, ...)
 {
-    if (game_fd == SOCK_BAD) return;
+    if (game_fd == SOCK_BAD || game_overflow) return;
     char buf[1024], *p = buf;
     va_list ap, ap2;
     va_start(ap, fmt);
@@ -846,7 +865,21 @@ static void game_send(const char *fmt, ...)
     va_end(ap);
     if (n >= (int)sizeof buf && (p = malloc((size_t)n + 1))) vsnprintf(p, (size_t)n + 1, fmt, ap2);
     va_end(ap2);
-    if (n > 0 && p && send(game_fd, p, n, SOCK_SEND_FLAGS) != n) logf_("could not send to the game");
+    if (n > 0 && p) {
+        game_flush();
+        int w = game_outlen ? 0 : (int)send(game_fd, p, n, SOCK_SEND_FLAGS);
+        if (w < 0) w = 0;
+        if (w < n) {
+            char *nb = game_outlen + (size_t)(n - w) <= GAME_OUT_MAX ? realloc(game_out, game_outlen + (size_t)(n - w)) : NULL;
+            if (nb) {
+                game_out = nb;
+                memcpy(game_out + game_outlen, p + w, (size_t)(n - w));
+                game_outlen += (size_t)(n - w);
+            } else {
+                game_overflow = 1;
+            }
+        }
+    }
     if (p != buf) free(p);
 }
 
@@ -1046,17 +1079,21 @@ static int yt_parse(const char *url, char vid[16], char list[64], int *index)
 }
 
 // ---- prefetch: look the next video up while the current one plays (cstv_ytdl.py keeps the answer)
+// Other players' links start these lookups (and title lookups below), so only a few run at once: one prefetch,
+// two title lookups; the rest are skipped.
 static char prefetched[2048];
+static atomic_int prefetching, title_jobs;
 
 static void *prefetch_thread(void *arg)
 {
     char *url = arg, script[1100], py[1100];
-    if (!url_ok(url)) { logf_("not looking up %s: not a public address", url); free(url); return NULL; }
+    if (!url_ok(url)) { logf_("not looking up %s: not a public address", url); free(url); prefetching = 0; return NULL; }
     os_exe_path(script, sizeof script, "cstv_ytdl.py");
     const char *argv[] = {tool("python3", PY_REL, py, sizeof py), script, "--prefetch", url, NULL};
     os_proc p;
     if (os_spawn(argv, NULL, OS_OUT_NULL, NULL, &p) == 0) os_proc_wait(&p);
     free(url);
+    prefetching = 0;
     return NULL;
 }
 
@@ -1072,11 +1109,13 @@ static void prefetch(const char *url)
         u = single;
     }
     if (!strcmp(u, prefetched)) return;
+    if (prefetching) { logf_("not looking up %s ahead: a lookup is still running", u); return; }
     snprintf(prefetched, sizeof prefetched, "%s", u);
     char *copy = strdup(u);
     pthread_t t;
+    prefetching = 1;
     if (copy && pthread_create(&t, NULL, prefetch_thread, copy) == 0) pthread_detach(t);
-    else free(copy);
+    else { free(copy); prefetching = 0; }
     logf_("looking up the next video ahead: %s", u);
 }
 
@@ -1086,9 +1125,9 @@ static void *title_thread(void *arg)
 {
     struct title_job *j = arg;
     char out[512] = "", yt[1100];
-    if (!url_ok(j->url)) { free(j); return NULL; }
-    const char *argv[] = {tool("yt-dlp", YTDLP_REL, yt, sizeof yt), "--no-cache-dir", "--no-warnings", "--flat-playlist",
-                          "-I", "1", "--print", "%(title).60s", "--", j->url, NULL};
+    if (!url_ok(j->url)) { free(j); title_jobs--; return NULL; }
+    const char *argv[] = {tool("yt-dlp", YTDLP_REL, yt, sizeof yt), "--no-cache-dir", "--no-warnings", "--socket-timeout", "15",
+                          "--flat-playlist", "-I", "1", "--print", "%(title).60s", "--", j->url, NULL};
     os_proc pr;
     int fd;
     if (os_spawn(argv, NULL, OS_OUT_PIPE, &fd, &pr) == 0) {
@@ -1114,6 +1153,7 @@ static void *title_thread(void *arg)
         master_send("title %s %s\n", j->uid, bt);
     }
     free(j);
+    title_jobs--;
     return NULL;
 }
 
@@ -1129,8 +1169,8 @@ static void *pl_thread(void *arg)
     size_t len = 0;
     if (!out) { free(j); return NULL; }
     char yt[1100];
-    const char *argv[] = {tool("yt-dlp", YTDLP_REL, yt, sizeof yt), "--no-cache-dir", "--no-warnings", "--flat-playlist",
-                          "-I", range, "--print", "%(id)s %(title).50s", "--", j->url, NULL};
+    const char *argv[] = {tool("yt-dlp", YTDLP_REL, yt, sizeof yt), "--no-cache-dir", "--no-warnings", "--socket-timeout", "15",
+                          "--flat-playlist", "-I", range, "--print", "%(id)s %(title).50s", "--", j->url, NULL};
     os_proc pr;
     int fd;
     if (os_spawn(argv, NULL, OS_OUT_PIPE, &fd, &pr) == 0) {
@@ -1350,6 +1390,7 @@ static const char *load_note;   // second line of the loading screen instead of 
 static int opt_audio;           // this player picked "audio only"
 static int load_retries;
 static char ytdl_err[200];      // why yt-dlp refused the current link ("" = it didn't)
+static int ytdl_err_same;       // ...and every viewer gets that refusal (private, removed, ...), not just this player
 static double req_pos;
 static uint64_t req_at;
 static int pending_running = 1;   // the server's clock runs while we load: add the load time to the seek
@@ -1410,6 +1451,7 @@ static void load_url(const char *url, double pos_s, int paused)
     resync_pending = 0;
     stream_broken = 0;
     ytdl_err[0] = 0;
+    ytdl_err_same = 0;
     sync_at = 0;   // positions from the previous link mean nothing for this one
     cur_login[0] = 0;
     cur_ytlive[0] = 0;
@@ -1688,7 +1730,7 @@ static int64_t pick_video_track_x(int max_h, const int64_t *excl, int nexcl)
                     continue;
                 }
                 if (!h || !codec[0] || !strcmp(codec, "null")) continue;   // size or codec unknown
-                if (strstr(title, "Premium") || strstr(title, "-sr ") || strstr(title, "AI-upscaled")) continue;   // see YT_FORMAT
+                if (strstr(title, "Premium") || strstr(title, "-sr ") || strstr(title, "AI-upscaled")) continue;   // see yt_format_for
                 if (h < low_h) { low_h = (int)h; low = id; }
                 if (max_h > 0 && h > max_h) continue;
                 int rank = !strcmp(codec, cur_codec) ? 3 : !strcmp(codec, "vp9") ? 2 : !strcmp(codec, "av1") ? 1 : 0;
@@ -1852,19 +1894,20 @@ static void do_sync(double pos_s, int running)
 // -> a line for the error screen
 static void keep_ytdl_error(const char *text)
 {
-    static const struct { const char *has, *say; } known[] = {
-        {"Private video", "it's a private video"},
-        {"confirm your age", "it's age-restricted (needs a signed-in account)"},
-        {"not a bot", "YouTube wants a sign-in (bot check), try again later"},
-        {"members-only", "it's for channel members only"},
-        {"Join this channel", "it's for channel members only"},
-        {"not made this video available in your country", "it's blocked in this country (VPN location?)"},
-        {"Premieres in", "it hasn't premiered yet"},
-        {"live event will begin", "the live stream hasn't started yet"},
-        {"Unsupported URL", "this site isn't supported"},
+    static const struct { const char *has, *say; int same; } known[] = {   // same: every viewer gets it
+        {"Private video", "it's a private video", 1},
+        {"confirm your age", "it's age-restricted (needs a signed-in account)", 1},
+        {"not a bot", "YouTube wants a sign-in (bot check), try again later", 0},
+        {"members-only", "it's for channel members only", 1},
+        {"Join this channel", "it's for channel members only", 1},
+        {"not made this video available in your country", "it's blocked in this country (VPN location?)", 0},
+        {"Premieres in", "it hasn't premiered yet", 1},
+        {"live event will begin", "the live stream hasn't started yet", 1},
+        {"Unsupported URL", "this site isn't supported", 1},
     };
     for (size_t i = 0; i < sizeof known / sizeof *known; i++)
-        if (strstr(text, known[i].has)) { snprintf(ytdl_err, sizeof ytdl_err, "%s", known[i].say); return; }
+        if (strstr(text, known[i].has)) { snprintf(ytdl_err, sizeof ytdl_err, "%s", known[i].say); ytdl_err_same = known[i].same; return; }
+    ytdl_err_same = strstr(text, "has been removed") || strstr(text, "has been terminated") || strstr(text, "no longer available");
     const char *s = text + 7;   // past "ERROR: "
     if (*s == '[') {            // "[extractor] id: "
         const char *e = strstr(s, "]");
@@ -1998,7 +2041,9 @@ static void handle_mpv_events(void)
                     set_status(CSTV_ERROR, "could not play: %s", ytdl_err[0] ? ytdl_err : mpv_error_string(ef->error));
                     const char *why = ytdl_err[0] ? ytdl_err : cur_live ? "the stream ended or is offline" : "the site didn't hand over a playable video";
                     set_screen(SCR_ERROR, "Couldn't play this", why);
-                    if (cur_url[0] && !streamlink_running()) { want_next = 1; give_up(why); }   // move on (queue / playlist) instead of sitting on an error
+                    // move on (queue / playlist) instead of sitting on an error, but only alone or when every viewer gets
+                    // this error: one player's VPN or bot check must not skip the video for the whole room
+                    if (cur_url[0] && !streamlink_running() && (sync_tol >= 1.5 || ytdl_err_same)) { want_next = 1; give_up(why); }
                 }
             }
             break;
@@ -2342,12 +2387,14 @@ static void start_title_job(const char *uid, const char *url_b64)
     const char *d = uid;
     while (*d >= '0' && *d <= '9') d++;
     if (!*uid || *d || strlen(uid) > 20 || b64decode(url_b64, url, sizeof url) < 0 || !url_syntax_ok(url)) return;
+    if (title_jobs >= 2) { logf_("title lookup for %s skipped: two are running", uid); return; }
     if (!(j = calloc(1, sizeof *j))) return;
     snprintf(j->url, sizeof j->url, "%s", url);
     snprintf(j->uid, sizeof j->uid, "%s", uid);
     pthread_t t;
+    title_jobs++;
     if (pthread_create(&t, NULL, title_thread, j) == 0) pthread_detach(t);
-    else free(j);
+    else { free(j); title_jobs--; }
 }
 
 // ------------------------------------------------------------------ the CS:TV hub (cstv.xyz)
@@ -2481,6 +2528,12 @@ static void m_start(void)
     int in = -1, out = -1;
     m_since = now_ns();
     if (os_spawn(argv, &in, OS_OUT_PIPE, &out, &m_proc)) { m_close("could not start cstv_link.py"); return; }
+#ifndef _WIN32
+    // a stalled link: master_send's write fails (m_broken: reconnect) instead of freezing the main loop; 1 MB (best
+    // effort, as on Windows) so a burst of lines from the game doesn't count as stalled
+    fcntl(in, F_SETPIPE_SZ, 1 << 20);
+    fcntl(in, F_SETFL, O_NONBLOCK);
+#endif
     struct m_reader_arg *a = malloc(sizeof *a);
     pthread_mutex_lock(&m_mu);
     m_in = in;
@@ -2653,6 +2706,10 @@ static void master_line(char *line)
         if (b64decode(a1, url, sizeof url) > 0 && url_syntax_ok(url)) prefetch(url);
     } else if (!strcmp(verb, "stream_go")) {
         char url[2048];
+        if (!stream_asked) {   // the player didn't press Start: never stream unasked (a hub bug or a hacked hub)
+            if (!capturing()) master_send("stream stop\n");
+            return;
+        }
         stream_asked = 0;
         if (b64decode(a1, url, sizeof url) > 0) stream_go(url);
     } else if (!strcmp(verb, "stream_end")) {
@@ -2668,8 +2725,7 @@ static int m_allowed(const char *l)
 {
     static const char *const ok[] = {"where", "place", "remove", "link", "queue", "unqueue", "playnow", "clearqueue",
                                      "next", "prev", "pause", "seek", "speed", "loop",
-                                     "login", "logout", "status", "chat", "lobbies", "gifs", "chatgif",   // cstv.xyz: sign-in, lobby chat, lists
-                                     "paint"};   // the paint mod (p2paint): shared with the other mod users on this server
+                                     "login", "logout", "status", "chat", "lobbies", "gifs", "chatgif"};   // cstv.xyz: sign-in, lobby chat, lists
     static const char *const lobby[] = {"create", "join", "leave", "kick", "ban", "unban", "owner", "perm", "name", "password",
                                         "set", "delete"};
     char v[16] = "", sub[16] = "";
@@ -3257,6 +3313,8 @@ static void handle_line(char *line)
         if (m_state == M_UP) master_send("%s\n", body);
     } else if (!strcmp(cmd, "lchat") && n >= 2) {   // lchat <size|show|mode|scroll|click|search|draft ...>: the Lobby page's chat
         overlay_line("lchat_ui", line + 6);
+    } else if (!strcmp(cmd, "view") && n >= 2) {   // view 0|1: is any CS:TV screen in sight
+        game_view = atoi(a) != 0;
     } else if (!strcmp(cmd, "xchat") && n >= 2) {   // xchat 0|1: the window's Live tab shows the stream's chat
         int v = atoi(a) != 0;
         if (v != chat_gui) {
@@ -3362,7 +3420,11 @@ int main(void)
     __builtin_cpu_init();
     use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
 #endif
-    os_init_paths();
+    if (os_init_paths()) {
+        logf_("%s belongs to another user (or others may write to it): not starting. CS:TV runs for one account at a time "
+              "on this PC; remove the folder or use that account", os_run_dir);
+        return 1;
+    }
     prefs_load();
     pscreens_load();
     // hub: CSTV_HUB_URL, else hub= in the prefs, else wss://cstv.xyz/game
@@ -3411,7 +3473,7 @@ int main(void)
     for (;;) {
         struct pollfd pf[4] = {{ls, POLLIN, 0}, {os_wake_rd, POLLIN, 0}};
         int npf = 2, icl = -1, ipend = -1;   // (WSAPoll only takes real sockets)
-        if (cl != SOCK_BAD) { icl = npf; pf[npf].fd = cl; pf[npf].events = POLLIN; pf[npf++].revents = 0; }
+        if (cl != SOCK_BAD) { icl = npf; pf[npf].fd = cl; pf[npf].events = POLLIN | (game_outlen ? POLLOUT : 0); pf[npf++].revents = 0; }
         if (pend != SOCK_BAD) { ipend = npf; pf[npf].fd = pend; pf[npf].events = POLLIN; pf[npf++].revents = 0; }
         poll(pf, npf, 200);
         shm->heartbeat_ns = now_ns();
@@ -3426,25 +3488,33 @@ int main(void)
             os_wake_drain();
             handle_mpv_events();
         }
-        if (icl >= 0 && (pf[icl].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (icl >= 0 && (pf[icl].revents & POLLOUT)) game_flush();
+        int gone = cl != SOCK_BAD && game_overflow;
+        if (gone) logf_("the game isn't reading (over %u KB waiting for it): dropping its connection", GAME_OUT_MAX >> 10);
+        if (!gone && icl >= 0 && (pf[icl].revents & (POLLIN | POLLHUP | POLLERR))) {
             int r = (int)recv(cl, buf + blen, (int)(sizeof buf - 1 - blen), 0);
             if (r <= 0) {
-                sock_close(cl);
-                cl = SOCK_BAD;
-                game_fd = SOCK_BAD;
-                if (capturing() || stream_asked) stream_cmd("stop");
-                ident_id[0] = where_line[0] = 0;   // a new connection says who and where it is again
-                chk_cancel();
-                if (cur_url[0]) stop_playback("game disconnected");
-                logf_("game disconnected");
-                chat_gui = 0;   // its window is gone
-                alone_since = now_ns();
-                alone_limit = 15000000000ull;
+                gone = 1;
             } else {
                 blen += r;
                 buf[blen] = 0;
                 blen = run_lines(buf, blen, sizeof buf);
             }
+        }
+        if (gone) {
+            sock_close(cl);
+            cl = SOCK_BAD;
+            game_fd = SOCK_BAD;
+            game_outlen = 0;
+            game_overflow = 0;
+            if (capturing() || stream_asked) stream_cmd("stop");
+            ident_id[0] = where_line[0] = 0;   // a new connection says who and where it is again
+            chk_cancel();
+            if (cur_url[0]) stop_playback("game disconnected");
+            logf_("game disconnected");
+            chat_gui = 0;   // its window is gone
+            alone_since = now_ns();
+            alone_limit = 15000000000ull;
         }
         if (pf[0].revents & POLLIN) {
             sock_t c = os_accept(ls);
@@ -3473,6 +3543,9 @@ int main(void)
                 cl = pend;
                 pend = SOCK_BAD;
                 game_fd = cl;
+                game_outlen = 0;   // the old connection's tail
+                game_overflow = 0;
+                game_view = 1;
                 game_send("chat %d\n", chat_state);
                 if (chat_avail >= 0) game_send("chatavail %d\n", chat_avail);
                 game_send("master %d\n", m_welcomed);
@@ -3556,11 +3629,18 @@ int main(void)
                     load_note = NULL;
                     load_running = 1;
                 } else {
-                    logf_("the video keeps failing: moving on");
                     set_status(CSTV_ERROR, "could not play: the site kept refusing the video");
                     set_screen(SCR_ERROR, "Couldn't play this", "the site kept refusing the video");
-                    give_up("the site kept refusing the video");
-                    want_next = 1;
+                    if (sync_tol >= 1.5) {   // alone: move on. With others watching it may be this player's network only
+                        logf_("the video keeps failing: moving on");
+                        give_up("the site kept refusing the video");
+                        want_next = 1;
+                    } else {
+                        logf_("the video keeps failing: the error stays on this screen, the others keep watching");
+                        const char *cmd[] = {"stop", NULL};
+                        mpv_command(mpv, cmd);
+                        file_loaded = seek_wait = resync_pending = 0;   // no more reloads of this link
+                    }
                 }
             }
         }

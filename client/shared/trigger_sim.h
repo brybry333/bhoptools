@@ -10,8 +10,12 @@
 static const int   PRED_MAX_EVENTS   = 512;
 static const int   PRED_RING_SIZE     = 256;
 static const int   PRED_SERVICE_CAP    = 1024;
-static const float PRED_NEVER          = -1e9f;
 static const int   PRED_SCRIPT_STEPS   = 40000;
+// Outputs times their targets: a crafted map's thousands of same-named entities make millions (gigabytes, minutes at
+// load). Past this, or past the fire-limited actions every snapshot copies, the map's triggers aren't predicted
+// (real maps: far below both).
+static const long long PRED_MAX_PAIRS   = 1 << 20;
+static const size_t    PRED_MAX_LIMITED = 1 << 16;
 
 static const int PRED_MOVETYPE_NONE   = 0;
 static const int PRED_MOVETYPE_WALK   = 2;
@@ -31,16 +35,14 @@ enum PredClass {
 
 enum PredInput {
 	IN_NONE, IN_ENABLE, IN_DISABLE, IN_TOGGLE, IN_KILL, IN_TRIGGER, IN_ENABLEREFIRE, IN_CANCELPENDING,
-	IN_CNT_ADD, IN_CNT_SUB, IN_CNT_MUL, IN_CNT_DIV, IN_CNT_SETVALUE, IN_CNT_SETVALUENOFIRE,
-	IN_CNT_SETHITMAX, IN_CNT_SETHITMIN, IN_CNT_GETVALUE,
+	IN_CNT_ADD, IN_CNT_SUB, IN_CNT_MUL, IN_CNT_DIV, IN_CNT_SETVALUE, IN_CNT_SETVALUENOFIRE, IN_CNT_GETVALUE,
 	IN_BR_SETVALUE, IN_BR_SETVALUETEST, IN_BR_TOGGLE, IN_BR_TOGGLETEST, IN_BR_TEST,
 	IN_CASE_INVALUE,
 	IN_DOOR_OPEN, IN_DOOR_CLOSE, IN_DOOR_TOGGLE, IN_DOOR_LOCK, IN_DOOR_UNLOCK
 };
 
 enum PredOutput {
-	OUT_ONSTARTTOUCH, OUT_ONSTARTTOUCHALL, OUT_ONENDTOUCH, OUT_ONENDTOUCHALL,
-	OUT_ONTOUCHING, OUT_ONNOTTOUCHING, OUT_ONTRIGGER,
+	OUT_ONSTARTTOUCH, OUT_ONSTARTTOUCHALL, OUT_ONENDTOUCH, OUT_ONENDTOUCHALL, OUT_ONTRIGGER,
 	OUT_OUTVALUE, OUT_ONGETVALUE, OUT_ONHITMIN, OUT_ONHITMAX,
 	OUT_ONTRUE, OUT_ONFALSE, OUT_ONDEFAULT,
 	OUT_ONOPEN, OUT_ONFULLYOPEN, OUT_ONCLOSE, OUT_ONFULLYCLOSED, OUT_ONDAMAGED,
@@ -63,6 +65,8 @@ struct PredAction {
 	bool  hasParam = false;
 	float delay;
 	int   timesToFire;
+	int   timesSlot = -1; // its count in PredWorld::actionTimesLeft, for timesToFire > 0
+	int   caseHit = -1;   // a logic_case InValue with a parameter: the case it matches, -1 for OnDefault
 
 	int         playerKey = PPK_NONE;
 	float       playerVec[3] = {0,0,0};
@@ -111,8 +115,8 @@ struct PredSimEnt {
 	float counterMax = 0.0f;
 	bool  initialBranch = false;
 
-	int   caseCount = 0;
-	float caseValue[16] = {0};
+	std::vector<std::string> cases; // logic_case's Case01-16, "" where unset
+	float relayDelay = 0.0f;        // logic_relay: GetMaxDelay of its OnTrigger
 
 	float doorTravel = 0.0f; // seconds from one end to the other
 	bool  doorStartOpen = false;
@@ -130,8 +134,8 @@ struct PredEntState {
 	uint8_t inList = 0;
 	uint8_t hitMin = 0, hitMax = 0, branchValue = 0, waitForRefire = 0;
 	float   counterValue = 0.0f;
-	float   multiWaitUntil = PRED_NEVER;
 	int     multiReadyTick = INT_MIN;
+	int     multiWaitTick = INT_MIN; // without eventqueuefix: the tick of trigger_multiple's next think
 	uint8_t doorState = PDS_BOTTOM; // a door's m_bLocked is `disabled`
 	int     doorDoneTick = INT_MAX; // the command whose frame ends the door's move or its wait at the top
 };
@@ -161,7 +165,6 @@ struct PredWorld {
 	float                     gravity = 1.0f;
 	bool                      gravityFix = false;
 	bool                      movedLast = false;
-	bool                      teleportedLast = false;
 	bool                      duckedAtEnd = false;
 	int                       rngTeleportTick = INT_MIN / 2;
 	bool                      rngTeleportSeq = false;
@@ -216,8 +219,6 @@ static int PredOutputId(const char* name)
 	if (!strcasecmp(name, "OnStartTouchAll")) return OUT_ONSTARTTOUCHALL;
 	if (!strcasecmp(name, "OnEndTouch"))      return OUT_ONENDTOUCH;
 	if (!strcasecmp(name, "OnEndTouchAll"))   return OUT_ONENDTOUCHALL;
-	if (!strcasecmp(name, "OnTouching"))      return OUT_ONTOUCHING;
-	if (!strcasecmp(name, "OnNotTouching"))   return OUT_ONNOTTOUCHING;
 	if (!strcasecmp(name, "OnTrigger"))       return OUT_ONTRIGGER;
 	if (!strcasecmp(name, "OutValue"))        return OUT_OUTVALUE;
 	if (!strcasecmp(name, "OnGetValue"))      return OUT_ONGETVALUE;
@@ -254,8 +255,6 @@ static int PredInputId(PredClass targetCls, const char* name)
 		if (!strcasecmp(name, "Divide"))         return IN_CNT_DIV;
 		if (!strcasecmp(name, "SetValue"))       return IN_CNT_SETVALUE;
 		if (!strcasecmp(name, "SetValueNoFire")) return IN_CNT_SETVALUENOFIRE;
-		if (!strcasecmp(name, "SetHitMax"))      return IN_CNT_SETHITMAX;
-		if (!strcasecmp(name, "SetHitMin"))      return IN_CNT_SETHITMIN;
 		if (!strcasecmp(name, "GetValue"))       return IN_CNT_GETVALUE;
 		break;
 	case PC_BRANCH:
@@ -434,10 +433,11 @@ static void PredBuildFilters(PredMap& map, const PredNameIndex& names, std::vect
 		map.filters.push_back(f);
 	}
 
+	// CFilterMultiple::Activate: Filter01-05, skipping a name whose first entity isn't a filter.
 	for (int fi = 0; fi < (int)map.filters.size(); ++fi) {
 		if (map.filters[fi].kind != FK_MULTI) continue;
 		const PredMapEntity& e = map.entities[filterEntity[fi]];
-		for (int k = 1; k <= 10; ++k) {
+		for (int k = 1; k <= 5; ++k) {
 			char key[16];
 			snprintf(key, sizeof(key), "Filter%02d", k);
 			const char* name = e.Get(key);
@@ -445,33 +445,37 @@ static void PredBuildFilters(PredMap& map, const PredNameIndex& names, std::vect
 			const int ent = names.First(name);
 			const int found = ent >= 0 ? entFilter[ent] : -1;
 			if (found >= 0) map.filters[fi].subs.push_back(found);
-			else            map.filters[fi].kind = FK_UNSUPPORTED;
 		}
 	}
 }
 
-// depth guards a filter_multi cycle, which would otherwise hang the game.
-static bool PredFilterPasses(const PredMap& map, int fi, const char* playerName, const char* playerClass, int depth = 0)
+// Stops at the first sub-filter that decides, like the server. `budget` is the calls left for this check: a
+// filter_multi that lists itself, or deep nesting, would otherwise hang the game.
+static bool PredFilterCheck(const PredMap& map, int fi, const char* playerName, const char* playerClass, int& budget)
 {
 	if (fi < 0 || fi >= (int)map.filters.size()) return true;
-	if (depth > 16) return false;
+	if (--budget < 0) return false;
 	const PredFilter& f = map.filters[fi];
 	bool impl;
 	switch (f.kind) {
-	case FK_NAME:  impl = PredWildcardMatch(f.param.c_str(), playerName); break;
+	case FK_NAME:  impl = !strcasecmp(f.param.c_str(), "!player") || PredWildcardMatch(f.param.c_str(), playerName); break;
 	case FK_CLASS: impl = PredWildcardMatch(f.param.c_str(), playerClass); break;
-	case FK_MULTI: {
-		if (f.subs.empty()) { impl = true; break; }
+	case FK_MULTI:
 		impl = f.multiAnd;
-		for (int s : f.subs) {
-			bool p = PredFilterPasses(map, s, playerName, playerClass, depth + 1);
-			impl = f.multiAnd ? (impl && p) : (impl || p);
-		}
-		break; }
+		for (int s : f.subs)
+			if (PredFilterCheck(map, s, playerName, playerClass, budget) != f.multiAnd) { impl = !f.multiAnd; break; }
+		break;
 	default:
 		return false;
 	}
 	return f.negated ? !impl : impl;
+}
+
+static bool PredFilterPasses(const PredMap& map, int fi, const char* playerName, const char* playerClass)
+{
+	int budget = 64;
+	const bool pass = PredFilterCheck(map, fi, playerName, playerClass, budget);
+	return pass && budget >= 0;
 }
 
 // The engine pads trigger bounds by a unit; binning adds one more.
@@ -563,7 +567,7 @@ static void PredScriptTargets(const PredMap& map, const PredNameIndex& names, in
 
 // Compiles every logic_script's files, then whatever code outputs send to a script scope,
 // so that code which may redefine functions is known before any is trusted.
-static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScriptIndex& idx)
+static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScriptIndex& idx, long long& pairs)
 {
 	map.vsPrograms.clear();
 	idx.compiled.clear();
@@ -620,6 +624,7 @@ static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScrip
 				|| !strcasecmp(in, "KillHierarchy") || !strcasecmp(in, "TerminateScriptScope");
 			if (!script && !breaks) continue;
 			PredScriptTargets(map, names, i, fields[0], targets);
+			if ((pairs += (long long)targets.size()) > PRED_MAX_PAIRS) return;
 			for (int t : targets) {
 				if (breaks) { broken[t] = 1; continue; }
 				int pi = idx.entScope[t];
@@ -668,6 +673,28 @@ static void PredBuildScripts(PredMap& map, const PredNameIndex& names, PredScrip
 	}
 }
 
+// Entities an output changes as the map runs (AddOutput, or a new parent), where the sim only knows the spawn
+// keyvalues: by name, classname, !self or !caller.
+static void PredBuildChanged(const PredMap& map, const PredNameIndex& names, std::vector<uint8_t>& changed, long long& pairs)
+{
+	changed.assign(map.entities.size(), 0);
+	std::vector<std::string> fields;
+	std::vector<int> targets;
+	for (int i = 0; i < (int)map.entities.size(); ++i) {
+		for (const PredKv& kv : map.entities[i].kv) {
+			if (kv.value.find(',') == std::string::npos && kv.value.find('\x1b') == std::string::npos) continue;
+			PredSplitOutput(kv.value.c_str(), fields);
+			if (fields.size() < 2) continue;
+			const char* in = fields[1].c_str();
+			if (strcasecmp(in, "AddOutput") && strcasecmp(in, "SetParent") && strcasecmp(in, "SetParentAttachment")
+				&& strcasecmp(in, "ClearParent")) continue;
+			PredScriptTargets(map, names, i, fields[0], targets);
+			if ((pairs += (long long)targets.size()) > PRED_MAX_PAIRS) return;
+			for (int t : targets) changed[t] = 1;
+		}
+	}
+}
+
 static int PredScriptLookup(const PredMap& map, const PredScriptIndex& idx, int ent, const std::vector<std::string>& fields)
 {
 	const int pi = ent >= 0 && ent < (int)idx.entScope.size() ? idx.entScope[ent] : -1;
@@ -684,6 +711,14 @@ static int PredScriptLookup(const PredMap& map, const PredScriptIndex& idx, int 
 }
 
 static void PredBuildMpbhops(PredMap& map);
+
+// CLogicCase::InputValue: the first case equal to the value's text, ignoring case; -1 for none.
+static int PredCaseMatch(const PredSimEnt& e, const char* text)
+{
+	for (int k = 0; k < (int)e.cases.size(); ++k)
+		if (!e.cases[k].empty() && !strcasecmp(e.cases[k].c_str(), text)) return k;
+	return -1;
+}
 
 // SourceJump's landfix.sp: a trigger_multiple output that keeps setting the activator's basevelocity.
 static bool PredSjBoostOutput(const char* value)
@@ -723,12 +758,17 @@ static void PredBuildTriggers(PredMap& map)
 	std::vector<int> filterEntity, entFilter;
 	map.sim.clear();
 	map.actions.clear();
+	map.actionTimes.clear();
 	map.filters.clear();
+	map.stats.overCap = false;
 	PredNameIndex names;
 	names.Build(map);
 	PredBuildFilters(map, names, filterEntity, entFilter);
 	PredScriptIndex scripts;
-	PredBuildScripts(map, names, scripts);
+	long long pairs = 0;
+	PredBuildScripts(map, names, scripts, pairs);
+	std::vector<uint8_t> changed;
+	PredBuildChanged(map, names, changed, pairs);
 
 	entSim.assign(map.entities.size(), -1);
 	for (int i = 0; i < (int)map.entities.size(); ++i) {
@@ -738,6 +778,15 @@ static void PredBuildTriggers(PredMap& map)
 		e.cls = c;
 		e.entity = i;
 		e.hammerId = atoi(map.entities[i].Get("hammerid", "0"));
+		// Before any output is built: one with a parameter is matched against them then.
+		if (c == PC_CASE) {
+			for (int k = 0; k < 16; ++k) {
+				char key[16];
+				snprintf(key, sizeof(key), "Case%02d", k + 1);
+				const char* v = map.entities[i].Get(key);
+				if (v[0]) { e.cases.resize(k + 1); e.cases[k] = v; }
+			}
+		}
 		entSim[i] = (int)map.sim.size();
 		simEntity.push_back(i);
 		map.sim.push_back(e);
@@ -784,7 +833,7 @@ static void PredBuildTriggers(PredMap& map)
 
 	std::vector<std::string> fields;
 	std::vector<int> scriptTargets;
-	for (int s = 0; s < (int)map.sim.size(); ++s) {
+	for (int s = 0; s < (int)map.sim.size() && pairs <= PRED_MAX_PAIRS; ++s) {
 		PredSimEnt& e = map.sim[s];
 		const PredMapEntity& ent = map.entities[simEntity[s]];
 
@@ -811,6 +860,8 @@ static void PredBuildTriggers(PredMap& map)
 			if (!e.destValid && findEntity(ent.Get("target"))) skip = true;
 			const PredMapEntity* lm = findEntity(ent.Get("landmark"));
 			if (lm && movesWithParent(*lm)) skip = true;
+			const int dest = names.First(ent.Get("target")), mark = names.First(ent.Get("landmark"));
+			if ((dest >= 0 && changed[dest]) || (mark >= 0 && changed[mark])) skip = true;
 
 			e.snapAngles = e.destValid && !e.landmarkValid && !(e.spawnflags & 0x20);
 			break; }
@@ -835,21 +886,26 @@ static void PredBuildTriggers(PredMap& map)
 		case PC_ONCE:
 			e.wait = -1.0f;
 			break;
+		case PC_RELAY:
+			// GetMaxDelay runs over every OnTrigger action, modelled or not.
+			// shortcut: a spent ",N" one still counts (the server drops it from the list); fine until a map needs it.
+			for (const auto& kv : ent.kv) {
+				if (strcasecmp(kv.key.c_str(), "OnTrigger") != 0) continue;
+				PredSplitOutput(kv.value.c_str(), fields);
+				if (fields.size() > 3) e.relayDelay = fmaxf(e.relayDelay, (float)atof(fields[3].c_str()));
+			}
+			break;
 		case PC_COUNTER:
-			e.initialCounter = (float)atof(ent.Get("startvalue", "0"));
+			// KeyValue reads startvalue as an integer. Spawn puts min below max and clamps to them.
+			e.initialCounter = (float)(int)strtol(ent.Get("startvalue", "0"), nullptr, 10);
 			e.counterMin = (float)atof(ent.Get("min", "0"));
 			e.counterMax = (float)atof(ent.Get("max", "0"));
+			if (e.counterMax < e.counterMin) std::swap(e.counterMin, e.counterMax);
+			if (e.counterMin != 0.0f || e.counterMax != 0.0f)
+				e.initialCounter = fminf(fmaxf(e.initialCounter, e.counterMin), e.counterMax);
 			break;
 		case PC_BRANCH:
 			e.initialBranch = atoi(ent.Get("InitialValue", "0")) != 0;
-			break;
-		case PC_CASE:
-			for (int k = 0; k < 16; ++k) {
-				char key[16];
-				snprintf(key, sizeof(key), "Case%02d", k + 1);
-				const char* v = ent.Get(key);
-				if (v[0]) { e.caseValue[k] = (float)atof(v); e.caseCount = k + 1; }
-			}
 			break;
 		case PC_DOOR: {
 			// Only the timing of its outputs is modelled; the door itself is networked.
@@ -889,13 +945,14 @@ static void PredBuildTriggers(PredMap& map)
 		default:
 			break;
 		}
-		if (PredIsTriggerClass(e.cls) && (e.modelIndex < 0 || movesWithParent(ent))) skip = true;
+		if (PredIsTriggerClass(e.cls) && (e.modelIndex < 0 || movesWithParent(ent) || changed[simEntity[s]])) skip = true;
 		if (skip) { e.cls = PC_NONE; continue; }
 		if (e.cls == PC_PUSH || e.cls == PC_MULTIPLE)
 			e.sjBooster = e.modelIndex < (int)map.models.size() && PredSjBooster(ent, e.cls, map.models[e.modelIndex]);
 
 		e.actionStart = (int)map.actions.size();
 		for (const auto& kv : ent.kv) {
+			if (pairs > PRED_MAX_PAIRS) break;
 			int outId = PredOutputId(kv.key.c_str());
 			if (outId < 0) continue;
 			PredSplitOutput(kv.value.c_str(), fields);
@@ -903,6 +960,7 @@ static void PredBuildTriggers(PredMap& map)
 
 			if (PredIsScriptInput(fields[1].c_str())) {
 				PredScriptTargets(map, names, simEntity[s], fields[0], scriptTargets);
+				pairs += (long long)scriptTargets.size();
 				if (scriptTargets.empty()) map.stats.vsSkipped++;
 				for (int t : scriptTargets) {
 					const int fn = PredScriptLookup(map, scripts, t, fields);
@@ -953,6 +1011,7 @@ static void PredBuildTriggers(PredMap& map)
 				}
 
 				map.actions.push_back(a);
+				++pairs;
 				continue;
 			}
 
@@ -962,6 +1021,7 @@ static void PredBuildTriggers(PredMap& map)
 				targets.assign(1, s);
 			else
 				findSimByName(fields[0].c_str(), targets);
+			pairs += (long long)targets.size();
 			for (int t : targets) {
 				int inId = PredInputId(map.sim[t].cls, fields[1].c_str());
 				if (inId == IN_NONE) continue;
@@ -973,10 +1033,30 @@ static void PredBuildTriggers(PredMap& map)
 				a.param = a.hasParam ? (float)atof(fields[2].c_str()) : 0.0f;
 				a.delay = fields.size() > 3 ? (float)atof(fields[3].c_str()) : 0.0f;
 				a.timesToFire = PredTimesToFire(fields);
+				if (inId == IN_CASE_INVALUE) {
+					// shortcut: OnDefault passes its input on with its type (text or number), which events don't carry;
+					// unpredicted until they do.
+					if (!a.hasParam && outId == OUT_ONDEFAULT) continue;
+					if (a.hasParam) a.caseHit = PredCaseMatch(map.sim[t], fields[2].c_str());
+				}
 				map.actions.push_back(a);
 			}
 		}
 		e.actionCount = (int)map.actions.size() - e.actionStart;
+	}
+
+	for (PredAction& a : map.actions) {
+		if (a.timesToFire <= 0) continue;
+		a.timesSlot = (int)map.actionTimes.size();
+		map.actionTimes.push_back(a.timesToFire);
+	}
+	if (pairs > PRED_MAX_PAIRS || map.actionTimes.size() > PRED_MAX_LIMITED) {
+		map.sim.clear();
+		map.actions.clear();
+		map.actionTimes.clear();
+		map.filters.clear();
+		map.vsPrograms.clear();
+		map.stats.overCap = true;
 	}
 
 	map.simByHammerId.clear();
@@ -1106,10 +1186,10 @@ static void PredFireOutput(PredRuntime& rt, int entIdx, int outId, float value, 
 		int ai = e.actionStart + k;
 		const PredAction& a = map.actions[ai];
 		if (a.output != outId) continue;
-		if (a.timesToFire != -1 && w.actionTimesLeft[ai] == 0) continue;
+		if (a.timesSlot >= 0 && w.actionTimesLeft[a.timesSlot] == 0) continue;
 		float v = a.hasParam ? a.param : value;
 		PredEnqueue(rt, a.delay, playerActivator, a.target, a.input, v, ai);
-		if (a.timesToFire != -1 && w.actionTimesLeft[ai] > 0) w.actionTimesLeft[ai]--;
+		if (a.timesSlot >= 0) w.actionTimesLeft[a.timesSlot]--;
 	}
 }
 
@@ -1148,15 +1228,16 @@ static void PredFireShots(PredRuntime& rt, int key)
 	}
 }
 
-static float PredMaxDelay(const PredMap& map, int entIdx, int outId)
+// The text logic_case compares: the output's parameter, a float output's value as %g, else "" (a void output).
+static int PredCaseHit(const PredMap& map, const PredSimEnt& e, int action, float value)
 {
-	const PredSimEnt& e = map.sim[entIdx];
-	float m = 0.0f;
-	for (int k = 0; k < e.actionCount; ++k) {
-		const PredAction& a = map.actions[e.actionStart + k];
-		if (a.output == outId && a.delay > m) m = a.delay;
-	}
-	return m;
+	if (action < 0 || action >= (int)map.actions.size()) return -1;
+	const PredAction& a = map.actions[action];
+	if (a.hasParam) return a.caseHit;
+	if (a.output != OUT_OUTVALUE && a.output != OUT_ONGETVALUE) return -1;
+	char text[32];
+	snprintf(text, sizeof(text), "%g", value);
+	return PredCaseMatch(e, text);
 }
 
 static void PredCounterUpdate(PredRuntime& rt, int entIdx, float value)
@@ -1382,7 +1463,8 @@ static void PredRemove(PredRuntime& rt, int entIdx)
 
 static void PredTouchNow(PredRuntime& rt, int entIdx);
 
-static void PredAcceptInput(PredRuntime& rt, int entIdx, int input, float value)
+// `action`: the map action that sent it, -1 for none.
+static void PredAcceptInput(PredRuntime& rt, int entIdx, int input, float value, int action)
 {
 	const PredSimEnt& e = rt.map->sim[entIdx];
 	PredEntState& st = rt.world.ents[entIdx];
@@ -1405,7 +1487,7 @@ static void PredAcceptInput(PredRuntime& rt, int entIdx, int input, float value)
 		else if (!(e.spawnflags & 0x002)) {
 			st.waitForRefire = 1;
 			// The relay is its own activator, so this stays on the server's queue.
-			PredEnqueue(rt, PredMaxDelay(*rt.map, entIdx, OUT_ONTRIGGER) + 0.001f, false, entIdx, IN_ENABLEREFIRE, 0.0f);
+			PredEnqueue(rt, e.relayDelay + 0.001f, false, entIdx, IN_ENABLEREFIRE, 0.0f);
 		}
 		break;
 	case IN_ENABLEREFIRE:
@@ -1417,7 +1499,10 @@ static void PredAcceptInput(PredRuntime& rt, int entIdx, int input, float value)
 	// Dividing by zero still fires OutValue, with the value unchanged.
 	case IN_CNT_DIV:            if (!st.disabled) PredCounterUpdate(rt, entIdx, value != 0.0f ? st.counterValue / value : st.counterValue); break;
 	case IN_CNT_SETVALUE:       if (!st.disabled) PredCounterUpdate(rt, entIdx, value); break;
-	case IN_CNT_SETVALUENOFIRE: st.counterValue = fminf(fmaxf(value, e.counterMin), e.counterMax); break;
+	case IN_CNT_SETVALUENOFIRE:
+		if (!st.disabled)
+			st.counterValue = e.counterMin != 0.0f || e.counterMax != 0.0f ? fminf(fmaxf(value, e.counterMin), e.counterMax) : value;
+		break;
 	case IN_CNT_GETVALUE:       PredFireOutput(rt, entIdx, OUT_ONGETVALUE, st.counterValue); break;
 
 	case IN_BR_SETVALUE:     st.branchValue = value != 0.0f; break;
@@ -1427,9 +1512,8 @@ static void PredAcceptInput(PredRuntime& rt, int entIdx, int input, float value)
 	case IN_BR_TEST:         PredFireOutput(rt, entIdx, st.branchValue ? OUT_ONTRUE : OUT_ONFALSE, value); break;
 
 	case IN_CASE_INVALUE: {
-		for (int k = 0; k < e.caseCount; ++k)
-			if (e.caseValue[k] == value) { PredFireOutput(rt, entIdx, OUT_ONCASE0 + k, value); return; }
-		PredFireOutput(rt, entIdx, OUT_ONDEFAULT, value);
+		const int k = PredCaseHit(*rt.map, e, action, value);
+		PredFireOutput(rt, entIdx, k >= 0 ? OUT_ONCASE0 + k : OUT_ONDEFAULT, value);
 		break; }
 
 	case IN_DOOR_OPEN:
@@ -1528,7 +1612,7 @@ static void PredDispatch(PredRuntime& rt, const PredEvent& ev)
 		return;
 	}
 	if (ev.input == IN_KILL) PredKill(rt, ev);
-	else PredAcceptInput(rt, ev.target, ev.input, ev.value);
+	else PredAcceptInput(rt, ev.target, ev.input, ev.value, ev.action);
 }
 
 // eventqueuefix: a zero-tick event added while servicing fires in the same pass.
@@ -1648,14 +1732,15 @@ static void PredEffectMulti(PredRuntime& rt, int entIdx, const PredSimEnt& e)
 	const PredPlayerIO& io = *rt.io;
 	PredEntState& st = rt.world.ents[entIdx];
 	if (st.spent) return;
-	if (rt.eventQueueFix ? PredEventClock(io) < st.multiReadyTick : io.curtime < st.multiWaitUntil) return;
+	if (rt.eventQueueFix ? PredEventClock(io) < st.multiReadyTick : io.tick < st.multiWaitTick) return;
 	PredFireOutput(rt, entIdx, OUT_ONTRIGGER, 0.0f);
 	if (e.wait > 0.0f) {
 		if (rt.eventQueueFix) {
 			const int k = PredDelayTicks(e.wait, io.interval) - 1;
 			st.multiReadyTick = PredEventClock(io) + (k > 1 ? k : 1);
 		} else {
-			st.multiWaitUntil = io.curtime + e.wait;
+			// SetNextThink keeps a tick, which ActivateMultiTrigger compares with the command's.
+			st.multiWaitTick = (int)(0.5f + (io.curtime + e.wait) / io.interval);
 		}
 	} else {
 		// SetTouch(NULL) now, SUB_Remove 0.1 s later on the server's clock.
@@ -1990,9 +2075,7 @@ static void PredResetWorld(const PredMap& map, PredWorld& w)
 		w.ents[i].branchValue = map.sim[i].initialBranch ? 1 : 0;
 		if (map.sim[i].doorStartOpen) w.ents[i].doorState = PDS_TOP;
 	}
-	w.actionTimesLeft.resize(map.actions.size());
-	for (size_t i = 0; i < map.actions.size(); ++i)
-		w.actionTimesLeft[i] = map.actions[i].timesToFire;
+	w.actionTimesLeft = map.actionTimes;
 }
 
 static void PredReset(PredRuntime& rt)
@@ -2186,7 +2269,6 @@ static void PredPostMove(PredRuntime& rt, PredPlayerIO& io)
 	rt.io = &io;
 	rt.serviceBase = PredEventClock(io) + 1;
 	const float before[3] = { io.origin[0], io.origin[1], io.origin[2] };
-	const int teleports = rt.teleports;
 	// The move's touch list is made before any trigger moves the player.
 	const int door = PredMpbhopsTouchedDoor(rt, io);
 	// A non-solid player (dead, observing) touches nothing and keeps its links.
@@ -2194,10 +2276,8 @@ static void PredPostMove(PredRuntime& rt, PredPlayerIO& io)
 	PredMpbhopsTouch(rt, io, rt.mpbhopsStartDoor);
 	// AddToTouched keeps one entry per entity.
 	if (door != rt.mpbhopsStartDoor) PredMpbhopsTouch(rt, io, door);
-	const bool teleported = rt.teleports != teleports;
 	// rngfix does this in PostThink, before any timed event.
 	if (rt.postThinkHook) rt.postThinkHook(rt.postThinkUser, rt, io);
-	rt.world.teleportedLast = teleported;
 	if (io.frameEnd) PredUntouch(rt);
 	PredRunDoors(rt);
 	PredServiceTimedEvents(rt);

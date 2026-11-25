@@ -3,7 +3,6 @@
 #include "rawprecise.h"
 #include "pollfix.h"
 #include "settings.h"
-#include "mouse_split.h"
 #include "utils.h"
 #include "game_layout.h"
 #include "sigs.h"
@@ -11,7 +10,6 @@
 
 #include <atomic>
 #include <climits>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -27,8 +25,6 @@ const size_t kCap = 65536;
 Report g_ring[kCap];
 size_t g_head, g_count;
 std::vector<RAWMOUSE> g_buttons;
-int g_reports;
-int g_pendX, g_pendY;
 
 LONGLONG g_freq;
 double (*g_plat)();
@@ -45,13 +41,6 @@ bool g_failed;
 HWND g_gameTarget;
 bool g_gameSink;
 
-// The old even spread, fed the same reports, for bhoptools_rawcompare.
-MouseSplit g_shadow;
-struct Tick { int px, py, ox, oy; };
-std::vector<Tick> g_ticks;
-bool g_recording;
-double g_recordUntil;
-
 typedef BOOL(WINAPI* RegisterRawInputDevicesFn)(PCRAWINPUTDEVICE, UINT, UINT);
 RegisterRawInputDevicesFn oRegisterRawInputDevices = RegisterRawInputDevices;
 
@@ -65,7 +54,6 @@ LONGLONG Now()
 void Add(const RAWMOUSE& m, LONGLONG t)
 {
 	AcquireSRWLockExclusive(&g_lock);
-	g_reports++;
 	if (m.lLastX || m.lLastY) {
 		if (g_count < kCap) {
 			g_ring[(g_head + g_count) % kCap] = { t, m.lLastX, m.lLastY };
@@ -76,8 +64,6 @@ void Add(const RAWMOUSE& m, LONGLONG t)
 			r.dx += m.lLastX;
 			r.dy += m.lLastY;
 		}
-		g_pendX += m.lLastX;
-		g_pendY += m.lLastY;
 	}
 	if (m.usButtonFlags && g_buttons.size() < 4096)
 		g_buttons.push_back(m);
@@ -165,39 +151,7 @@ void SwitchOff()
 			CoreLog("rawinput2 precise: couldn't give the mouse back to the game (%lu)", GetLastError());
 	}
 	g_on = false;
-	g_recording = false;
 	CoreLog("rawinput2 precise: off");
-}
-
-void FinishCompare()
-{
-	g_recording = false;
-	size_t moved = 0;
-	double sumDiff = 0.0, sumMove = 0.0;
-	int maxDiff = 0;
-	for (const Tick& t : g_ticks) {
-		if (!t.px && !t.ox) continue;
-		moved++;
-		const int d = abs(t.px - t.ox);
-		sumDiff += d;
-		sumMove += abs(t.px);
-		if (d > maxDiff) maxDiff = d;
-	}
-	CoreLog("rawcompare: %u ticks, the mouse moved sideways on %u", (unsigned)g_ticks.size(), (unsigned)moved);
-	if (moved)
-		CoreLog("  per tick, the even spread was off from precise by %.1f counts on average (%.1f%% of the tick's movement), %d at most",
-			sumDiff / moved, sumMove > 0.0 ? sumDiff * 100.0 / sumMove : 0.0, maxDiff);
-	const std::string dir = settings::Dir();
-	const std::string path = dir + "\\rawcompare.csv";
-	FILE* f = dir.empty() ? nullptr : fopen(path.c_str(), "w");
-	if (f) {
-		fprintf(f, "tick,precise_x,spread_x,precise_y,spread_y\n");
-		for (size_t i = 0; i < g_ticks.size(); ++i)
-			fprintf(f, "%u,%d,%d,%d,%d\n", (unsigned)i, g_ticks[i].px, g_ticks[i].ox, g_ticks[i].py, g_ticks[i].oy);
-		fclose(f);
-		CoreLog("  every tick (mouse counts) is in %s", path.c_str());
-	}
-	g_ticks.clear();
 }
 
 void Cmd_RawPrecise(const CCommandX& c)
@@ -210,23 +164,7 @@ void Cmd_RawPrecise(const CCommandX& c)
 		g_window && !g_failed ? "" : ", unavailable, see above");
 }
 
-void Cmd_RawCompare(const CCommandX& c)
-{
-	if (!g_on) {
-		CoreLog("rawcompare: needs rawinput2 precise on (bhoptools_rawprecise 1) and m_rawinput 1");
-		return;
-	}
-	if (!settings::Get().rawinput)
-		CoreLog("rawcompare: rawinput2 is off, so ticks aren't split and the two will match");
-	const double secs = c.argc > 1 ? atof(c.argv[1]) : 5.0;
-	g_ticks.clear();
-	g_ticks.reserve(4096);
-	g_recording = true;
-	g_recordUntil = g_plat() + (secs > 0.0 && secs <= 60.0 ? secs : 5.0);
-	CoreLog("rawcompare: recording for %.0f s, strafe now", g_recordUntil - g_plat());
-}
-
-ConCommandX g_cmds[2];
+ConCommandX g_cmds[1];
 
 }  // namespace
 
@@ -313,36 +251,29 @@ void Update(bool rawActive, int (*drain)())
 	g_gameSink = sink;
 	AcquireSRWLockExclusive(&g_lock);
 	g_head = g_count = 0;
-	g_pendX = g_pendY = 0;
 	g_buttons.clear();
 	ReleaseSRWLockExclusive(&g_lock);
-	g_shadow = MouseSplit();
 	g_on = true;
 	CoreLog("rawinput2 precise: on, mouse reports are stamped on their own thread");
 }
 
 bool On() { return g_on; }
 
-int FlushButtons()
+void FlushButtons()
 {
 	static std::vector<RAWMOUSE> buttons;
 	AcquireSRWLockExclusive(&g_lock);
 	buttons.swap(g_buttons);
-	const int reports = g_reports;
-	g_reports = 0;
 	ReleaseSRWLockExclusive(&g_lock);
 	for (const RAWMOUSE& m : buttons)
 		pollfix::OnRawMouse(m);
 	buttons.clear();
-	return reports;
 }
 
 void Take(int& dx, int& dy, double split)
 {
 	const LONGLONG now = Now();
-	const double platNow = g_plat();
-	const LONGLONG limit = split == 0.0 ? LLONG_MAX : now - (LONGLONG)((platNow - split) * g_freq);
-	int pendX, pendY;
+	const LONGLONG limit = split == 0.0 ? LLONG_MAX : now - (LONGLONG)((g_plat() - split) * g_freq);
 	dx = dy = 0;
 	AcquireSRWLockExclusive(&g_lock);
 	while (g_count && g_ring[g_head].t <= limit) {
@@ -351,20 +282,7 @@ void Take(int& dx, int& dy, double split)
 		g_head = (g_head + 1) % kCap;
 		g_count--;
 	}
-	pendX = g_pendX;
-	pendY = g_pendY;
-	g_pendX = g_pendY = 0;
 	ReleaseSRWLockExclusive(&g_lock);
-
-	if (pendX || pendY)
-		MouseSplitAdd(g_shadow, pendX, pendY, platNow);
-	int ox, oy;
-	MouseSplitTake(g_shadow, ox, oy, split);
-	if (g_recording && split != 0.0) {
-		g_ticks.push_back({ dx, dy, ox, oy });
-		if (platNow >= g_recordUntil)
-			FinishCompare();
-	}
 }
 
 void RegisterCommands()
@@ -376,7 +294,7 @@ void RegisterCommands()
 	void* echo = cvar ? VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "echo") : nullptr;
 	const char* echoName = echo ? static_cast<ConCommandX*>(echo)->name : nullptr;
 	if (!echo || !VFunc<bool (*)(void*)>(echo, VT_CCB_IsCommand)(echo) || !echoName || strcmp(echoName, "echo")) {
-		CoreLog("rawinput2 precise: couldn't register bhoptools_rawprecise and bhoptools_rawcompare");
+		CoreLog("rawinput2 precise: couldn't register bhoptools_rawprecise");
 		return;
 	}
 	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {

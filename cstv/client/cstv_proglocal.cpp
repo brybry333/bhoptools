@@ -179,7 +179,19 @@ struct {
     std::vector<Entry> e;
     std::vector<Spot> s;
     int next_id = 1;
+    bool unread = false, warned = false;   // its file is there but couldn't be read: never written over (until the next load)
+    bool append_ok = false;                // the file ends with a whole line: a new attempt can go on its end
+    std::vector<std::pair<std::string, double>> t;   // time practising per day: seconds out of the start zone, run timer going
+    double t_unsaved = 0, t_saved_at = 0;
 } M;
+
+double &practised(const std::string &day)
+{
+    for (auto &p : M.t)
+        if (p.first == day) return p.second;
+    M.t.push_back({day, 0.0});
+    return M.t.back().second;
+}
 
 std::string dir_path()
 {
@@ -218,8 +230,9 @@ bool read_file(const std::string &path, std::string &out)
     char buf[65536];
     out.clear();
     for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) out.append(buf, n);
+    bool ok = !ferror(f);
     fclose(f);
-    return true;
+    return ok;
 }
 
 std::vector<std::string> split_tabs(const std::string &line)
@@ -263,15 +276,24 @@ void save_settings()
 }
 
 // Format: "progresslog 1", then per attempt  e <id> <day> <created> <source> <from> <from s> <to> <to s> <track>
-// and per spot  s <name> <lo> <hi>  (tab-separated; -1 = no time). Source: 0 typed, 1 !progsave, 2 a finished run.
+// and per spot  s <name> <lo> <hi>, per day  t <day> <seconds practised>  (tab-separated; -1 = no time). Source: 0 typed,
+// 1 !progsave, 2 a finished run.
 void load_map(const std::string &map)
 {
     M.map = map;
     M.e.clear();
     M.s.clear();
+    M.t.clear();
+    M.t_unsaved = 0;
     M.next_id = 1;
-    std::string d;
-    if (!read_file(map_file(map), d)) return;
+    M.unread = M.warned = M.append_ok = false;
+    std::string path = map_file(map), d;
+    if (!read_file(path, d)) {
+        struct stat st;
+        M.unread = !path.empty() && stat(path.c_str(), &st) == 0;   // there but unreadable (locked, a disk error)
+        return;
+    }
+    M.append_ok = !d.empty() && d.back() == '\n';
     size_t a = 0;
     while (a < d.size()) {
         size_t b = d.find('\n', a);
@@ -287,26 +309,61 @@ void load_map(const std::string &map)
             M.next_id = std::max(M.next_id, e.id + 1);
         } else if (f[0] == "s" && f.size() >= 4) {
             M.s.push_back({f[1], (float)atof(f[2].c_str()), (float)atof(f[3].c_str())});
+        } else if (f[0] == "t" && f.size() >= 3 && !f[1].empty()) {
+            double v = atof(f[2].c_str());
+            if (v > 0 && v < 1e9) practised(f[1]) += v;
         }
     }
     std::sort(M.e.begin(), M.e.end(), [](const Entry &x, const Entry &y) { return x.id < y.id; });
 }
 
+std::string entry_line(const Entry &e)
+{
+    char b[512];
+    snprintf(b, sizeof b, "e\t%d\t%s\t%ld\t%d\t%s\t%.3f\t%s\t%.3f\t%d\n", e.id, e.day.c_str(), e.created, e.src, e.from.c_str(), e.ft,
+             e.to.c_str(), e.tt, e.track);
+    return b;
+}
+
 void save_map()
 {
     if (M.map.empty()) return;
+    if (M.unread) {
+        if (!M.warned) {
+            M.warned = true;
+            chat("This map's Progress Log file couldn't be read (%s), so nothing is saved to it (that would wipe it). Rejoin the "
+                 "map to try again.", map_file(M.map).c_str());
+        }
+        return;
+    }
     std::string d = "progresslog 1\n";
     char b[512];
-    for (const Entry &e : M.e) {
-        snprintf(b, sizeof b, "e\t%d\t%s\t%ld\t%d\t%s\t%.3f\t%s\t%.3f\t%d\n", e.id, e.day.c_str(), e.created, e.src, e.from.c_str(), e.ft,
-                 e.to.c_str(), e.tt, e.track);
-        d += b;
-    }
+    for (const Entry &e : M.e) d += entry_line(e);
     for (const Spot &s : M.s) {
         snprintf(b, sizeof b, "s\t%s\t%.3f\t%.3f\n", s.name.c_str(), s.lo, s.hi);
         d += b;
     }
+    for (const auto &p : M.t) {
+        snprintf(b, sizeof b, "t\t%s\t%.1f\n", p.first.c_str(), p.second);
+        d += b;
+    }
+    M.t_unsaved = 0;
+    M.t_saved_at = plat_now();
     if (!write_file(map_file(M.map), d)) chat("Couldn't save the Progress Log (%s).", map_file(M.map).c_str());
+    else M.append_ok = true;
+}
+
+// a new attempt: one line on the end of the file (changes and deletes rewrite it)
+void save_new_entry(const Entry &e)
+{
+    std::string path = M.append_ok && !M.unread ? map_file(M.map) : "";
+    FILE *f = path.empty() ? nullptr : fopen(path.c_str(), "ab");
+    bool ok = f && fputs(entry_line(e).c_str(), f) >= 0;
+    if (f) ok = fclose(f) == 0 && ok;
+    if (!ok) {   // the whole file instead (that also cleans up a half-written line)
+        M.append_ok = false;
+        save_map();
+    }
 }
 
 // the log's day for a time: before the day start hour counts as the day before
@@ -358,6 +415,7 @@ void sync_book()
            std::to_string(S.bin)});
     for (const Entry &e : M.e) send_entry(e);
     for (const Spot &s : M.s) apply({"prog_ui", "s", s.name, num(s.lo), num(s.hi)});
+    for (const auto &p : M.t) apply({"prog_ui", "t", p.first, std::to_string((long)p.second)});
     apply({"prog_ui", "done"});
 }
 
@@ -400,7 +458,7 @@ int insert_entry(const std::string &from, float ft, const std::string &to, float
     time_t now = time(nullptr);
     Entry e = {M.next_id++, day_of(now), (long)now, src, from, to, ft, tt, track};
     M.e.push_back(e);
-    save_map();
+    save_new_entry(e);
     send_entry(e);
     return e.id;
 }
@@ -613,8 +671,10 @@ void *fetch_thread(void *)
     } else if (status == 404) {
         write_file(cache, "[]");   // not in the list: asked again in a week
         zones_ready(map, z, "no zones for this map in the zone list");
-    } else {
-        zones_ready(map, z, status ? "zone list: bad answer" : "zone list: no connection");
+    } else {   // no good answer: the zones the cache gave stay
+        std::lock_guard<std::mutex> l(g_zmu);
+        if (map == g_zone_map)
+            g_zone_status = std::string(status ? "zone list: bad answer" : "zone list: no connection") + ", kept " + std::to_string(g_zones.size()) + " cached zones";
     }
     free(body);
     return nullptr;
@@ -733,7 +793,7 @@ struct Me { float pos[3], vel[3]; bool alive, ducked; };
 
 bool read_me(Me &me)
 {
-    if (!g_eng || !g_ents || !g_eng->IsInGame()) return false;
+    if (!g_eng || !g_ents || !g_eng->IsInGame() || g_eng->IsPlayingDemo()) return false;   // (a demo's player isn't you)
     if (!NV.tried) find_netvars();
     IClientEntity *ent = g_ents->GetClientEntity(g_eng->GetLocalPlayer());
     if (!ent) return false;
@@ -857,7 +917,8 @@ void progsave()
 void finish(double now)
 {
     float t = run_time(now);
-    if (R.att && S.autofinish && insert_entry(R.from, R.ft, "End", t, 2, R.track) > 0) print_saved(R.from, R.ft, "End", t);
+    // (an attempt that began this moment was a teleport into the end zone, like shavit's !end: not a run)
+    if (R.att && S.autofinish && now - R.att_at >= 0.1 && insert_entry(R.from, R.ft, "End", t, 2, R.track) > 0) print_saved(R.from, R.ft, "End", t);
     R.att = false;
     R.state = R_DONE;
     keep_trace();
@@ -922,6 +983,20 @@ void tick()
         R.sample_at = now;
         Sample s = {{me.pos[0], me.pos[1], me.pos[2]}, run_time(now)};
         R.trace.push_back(s);
+    }
+    // time practising: out of the start zone with the run timer going (not dead, not finished, not in a start zone)
+    static std::string today;
+    static double today_at = -1e9, t_sent_at = 0;
+    if (now - today_at >= 30) { today = day_of(time(nullptr)); today_at = now; }
+    if (R.state == R_RUN && R.have) {
+        double dt = std::min(now - R.last_at, 0.25);
+        practised(today) += dt;
+        M.t_unsaved += dt;
+        if (now - M.t_saved_at >= 60) save_map();
+    }
+    if (g_viewing && now - t_sent_at >= 1) {
+        t_sent_at = now;
+        apply({"prog_ui", "t", today, std::to_string((long)practised(today))});
     }
     if (g_viewing && now - R.live_at >= 0.25) {
         R.live_at = now;
@@ -994,6 +1069,7 @@ void pl_level_init()
 
 void pl_level_end()
 {
+    if (M.t_unsaved > 0) save_map();
     M.map.clear();
     std::lock_guard<std::mutex> l(g_zmu);
     g_zone_map.clear();

@@ -108,10 +108,12 @@ static std::string shorten(const std::string &s) { return s.size() > 80 ? s.subs
 
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-static std::string b64encode(const std::string &in)
+// base64url without padding (cstv_gui.h: the GUI uses these too)
+std::string b64encode(const std::string &in)
 {
     std::string b;
-    int acc = 0, bits = 0;
+    unsigned acc = 0;
+    int bits = 0;
     for (unsigned char c : in) {
         acc = (acc << 8) | c;
         bits += 8;
@@ -121,15 +123,16 @@ static std::string b64encode(const std::string &in)
     return b;
 }
 
-static bool b64decode(const std::string &in, std::string &out)
+bool b64decode(const std::string &in, std::string &out)
 {
     out.clear();
-    int acc = 0, bits = 0;
+    unsigned acc = 0;
+    int bits = 0;
     for (char ch : in) {
         const char *p = ch ? strchr(B64, ch) : nullptr;
         if (ch == '=') break;
         if (!p) return false;
-        acc = (acc << 6) | (int)(p - B64);
+        acc = (acc << 6) | (unsigned)(p - B64);
         bits += 6;
         if (bits >= 8) { bits -= 8; out.push_back((char)((acc >> bits) & 0xff)); }
     }
@@ -212,6 +215,7 @@ bool cstv_enabled() { return g_on.load(); }
 // ---------------------------------------------------------------- helper connection (main thread only)
 static intptr_t g_sock = -1;
 static bool g_playing_sent;   // the helper was told to load the current link
+static int g_view_sent;       // the last `view` cstvd got: 1 = a screen may show the video (it compresses frames only then)
 static int g_speed_pct = 100;
 static int g_seek_id = -1;
 static bool g_running = true;   // the master's clock is running (false while it waits for the video to start)
@@ -219,15 +223,6 @@ static double g_last_connect_try, g_last_ping, g_last_where;
 static cstv_shm *g_shm;
 static std::string g_ident_sent, g_where_sent;   // what cstvd was last told (resent after reconnecting)
 static void helper_drop();
-
-// the paint mod's hooks (see paint_tick)
-typedef void (*paint_frame_t)(int (*send)(const char *), int epoch);
-typedef void (*paint_line_t)(const char *);
-static paint_frame_t g_paint_frame;
-static paint_line_t g_paint_line;
-static double g_paint_look = -100;
-static bool g_hub_link;   // cstvd is connected to cstv.xyz
-static int g_hub_epoch;   // +1 each time that comes up: the paint mod says hello again
 
 static bool helper_send(const char *fmt, ...)
 {
@@ -297,6 +292,7 @@ static void helper_connect(double t)
     g_where_sent.clear();
     update_where();
     helper_send("speed %.2f\n", g_speed_pct / 100.0);
+    if (helper_send("view 1\n")) g_view_sent = 1;
 }
 
 // ---------------------------------------------------------------- state from the master (via cstvd's "srv" lines)
@@ -308,7 +304,6 @@ static int g_last_vol = -1;
 // every way the connection ends (send failed, cstvd closed it, CS:TV off)
 static void helper_drop()
 {
-    g_hub_link = false;
     if (g_sock >= 0) plat_close(g_sock);
     g_sock = -1;
     g_playing_sent = false;   // after reconnecting, send the link + aged position again
@@ -447,29 +442,6 @@ static void on_master(const char *line)
 }
 
 // Lines from cstvd (non-blocking).
-// ---------------------------------------------------------------- the paint mod (p2paint)
-// The bhoptools fork's paint mod keeps everyone's paint on their own PC and shares it with the other mod users on the
-// same server through cstv.xyz: its lines go out from here as `m paint ...` (cstvd passes them to the hub) and the
-// hub's `paint ...` lines come back as `srv paint ...`. It gets its per-frame tick from here too (it has none of its
-// own until its menu exists). Found by its exports, looked for every 2 s until it's there.
-
-static int paint_send(const char *line)
-{
-    if (!g_hub_link || !line || strlen(line) > 3000) return 0;
-    return helper_send("m %s\n", line) ? 1 : 0;
-}
-
-static void paint_tick()
-{
-    double now = now_s();
-    if (!g_paint_frame && now - g_paint_look > 2) {
-        g_paint_look = now;
-        g_paint_line = (paint_line_t)plat_module_symbol(PLAT_P2PAINT, "p2paint_hub_line");
-        g_paint_frame = g_paint_line ? (paint_frame_t)plat_module_symbol(PLAT_P2PAINT, "p2paint_frame") : nullptr;
-    }
-    if (g_paint_frame) g_paint_frame(paint_send, g_hub_link && g_sock >= 0 ? g_hub_epoch : 0);
-}
-
 static void helper_poll()
 {
     if (g_sock < 0) return;
@@ -489,10 +461,6 @@ static void helper_poll()
         std::string line = g_from_helper.substr(0, nl);
         g_from_helper.erase(0, nl + 1);
         int v;
-        if (!line.compare(0, 10, "srv paint ")) {   // the paint mod's, from the hub
-            if (g_paint_line) g_paint_line(line.c_str() + 4);
-            continue;
-        }
         if (!line.compare(0, 4, "srv ")) {
             on_master(line.c_str() + 4);
         } else if (!line.compare(0, 8, "pscreen ")) {   // pscreen <server>/<map> <geometry|none>
@@ -508,8 +476,6 @@ static void helper_poll()
             g_last_bind_check = 0;   // show / hide the panel right away
         } else if (sscanf(line.c_str(), "master %d", &v) == 1) {
             say(v ? "connected to cstv.xyz" : "no connection to cstv.xyz");
-            if (v && !g_hub_link) g_hub_epoch++;
-            g_hub_link = v != 0;
         } else if (sscanf(line.c_str(), "capture %d", &v) == 1) {
             if (v) capture_start();
             else capture_stop();
@@ -598,11 +564,11 @@ void cstv_print(const char *text) { cstv_chat_line((std::string(" \x04[CS:TV]\x0
 
 void cstv_chat_line(const char *line)
 {
-    std::string s = line, text = line;
+    std::string s = line;
     if (s.size() > 250) s.resize(250);
     for (auto &c : s)
         if (c == '\n' || c == '\r') c = ' ';
-    if (!g_engine || !g_client || !g_engine->IsInGame()) { say("%s", text); return; }
+    if (!g_engine || !g_client || !g_engine->IsInGame()) { say("%s", line); return; }
     alignas(8) unsigned char data[272] = {0};   // bf_read reads whole words: padded
     size_t n = 0;
     data[n++] = 0;   // from: nobody
@@ -754,6 +720,18 @@ static void keep_bound(double t, bool force = false)
     g_chat_shown = g_chat_tex && g_chat && g_chat->latest <= 2 && g_chat_active && g_chat_mat;
     bind_texture(g_chat_mat, g_chat_shown ? g_chat_tex : nullptr, g_chat_tex, chat_placeholder);
     bind_texture(g_chat_see_mat, g_chat_shown ? g_chat_tex : nullptr, g_chat_tex, chat_see_placeholder);
+}
+
+// the video texture and our materials (shipped .vmt files): at each map load, and at the first frame for the menu
+static void setup_textures()
+{
+    ensure_texture();
+    if (!g_screen_mat) g_screen_mat = find_material("cstv/screen");
+    if (!g_chat_mat) g_chat_mat = find_material("cstv/chat");
+    if (!g_preview_mat) g_preview_mat = find_material("cstv/preview");
+    if (!g_outline_mat) g_outline_mat = find_material("cstv/outline");
+    if (!g_chat_see_mat) g_chat_see_mat = find_material("cstv/chat_see");
+    keep_bound(now_s(), true);
 }
 
 // Upload on the render thread: the main thread only queues this job; the render thread runs it.
@@ -1275,13 +1253,10 @@ static void lobby_cmd(const std::string &rest)
 {
     std::vector<std::string> w = words(rest);
     std::string sub = w.empty() ? "" : lower(w[0]), arg = w.size() > 1 ? w[1] : "";
-    auto code_ok = [](const std::string &c) {
-        return c.size() == 6 && std::all_of(c.begin(), c.end(), [](char ch) { return isalpha((unsigned char)ch) || (ch >= '2' && ch <= '9'); });
-    };
     if (sub == "create" || sub == "new") send_m("lobby create");
     else if (sub == "leave") send_m("lobby leave");
-    else if (sub == "join" && code_ok(arg)) send_m("lobby join %s", arg.c_str());
-    else if (w.size() == 1 && code_ok(w[0])) send_m("lobby join %s", w[0].c_str());
+    else if (sub == "join" && lobby_code_ok(arg)) send_m("lobby join %s", arg.c_str());
+    else if (w.size() == 1 && lobby_code_ok(w[0])) send_m("lobby join %s", w[0].c_str());
     else if ((sub == "kick" || sub == "ban" || sub == "owner" || sub == "unban") && all_digits(arg)) send_m("lobby %s %s", sub.c_str(), arg.c_str());
     else if (sub == "perm" && (arg == "all" || arg == "owner")) send_m("lobby perm %s", arg.c_str());
     else cstv_print("\x04!lobby create\x01, \x04!lobby <code>\x01, \x04!lobby leave\x01; owner: \x04kick|ban|owner <id>\x01, \x04unban <steamid>\x01, \x04perm all|owner\x01 (ids: \x04!cstv\x01)");
@@ -1441,19 +1416,18 @@ static void h_ClientCmdU(IVEngineClient *self, const char *cmd)
 static ConCommand g_cmd_say("say", say_cb, "say (CS:TV commands like !tv stay on this client)");
 static ConCommand g_cmd_say_team("say_team", say_cb, "say_team (CS:TV commands like !tv stay on this client)");
 static ConCommand g_cmd_cstv("cstv", cstv_cb, "CS:TV: cstv (window), cstv place [personal], cstv hud, cstv tv small, cstv link <url>, cstv pause, cstv next, cstv vol 50, cstv help ...");
-// the Progress Log window (cstv_prog.inc): the server's progresslog plugin sends `prog_ui ...`
-static void prog_args(const CCommand &args, bool test)
+// the Progress Log window (cstv_prog.inc); prog_ui only swallows the old progresslog plugin's lines (no "Unknown command")
+static void prog_cb(const CCommand &) {}
+static void prog_test_cb(const CCommand &args)
 {
     std::vector<const char *> v;
     for (int i = 0; i < args.ArgC(); i++) v.push_back(args[i]);
-    gui_prog_cmd((int)v.size(), v.data(), test);
+    gui_prog_cmd((int)v.size(), v.data());
 }
-static void prog_cb(const CCommand &args) { prog_args(args, false); }
-static void prog_test_cb(const CCommand &args) { prog_args(args, true); }
 static void book_cb(const CCommand &) { gui_prog_toggle(); }
 static ConCommand g_cmd_book("cstv_book", book_cb, "Open or close the Progress Log");
-static ConCommand g_cmd_prog("prog_ui", prog_cb, "Progress Log window (the server's progresslog plugin drives it; !prog)", FCVAR_SERVER_CAN_EXECUTE);
-static ConCommand g_cmd_prog_test("prog_ui_test", prog_test_cb, "Progress Log: prog_ui plus the testing verbs (tab, pick, mouse, focus, ask, noask, key, graph)");
+static ConCommand g_cmd_prog("prog_ui", prog_cb, "Progress Log: the old progresslog server plugin's command, ignored (the log is on this PC now; !prog)", FCVAR_SERVER_CAN_EXECUTE);
+static ConCommand g_cmd_prog_test("prog_ui_test", prog_test_cb, "Progress Log testing: the backend's prog_ui lines plus tab, pick, mouse, focus, ask, noask, key, graph");
 // the plugin's command names, now on this client: binds made for the plugin (bind x sm_progsave) keep working
 static void sm_prog_cb(const CCommand &args) { pl_console("prog", args.ArgS()); }
 static void sm_progsave_cb(const CCommand &) { pl_console("progsave", ""); }
@@ -1523,7 +1497,13 @@ static void go_dark()
 static void main_tick()
 {
     double t = now_s();
-    if (!g_cmds_done) register_commands();
+    static double prev_t;
+    bool stalled = prev_t && t - prev_t > 2.5;   // e.g. a map load: cstvd stops the video after 3 s without a ping
+    prev_t = t;
+    if (!g_cmds_done) {
+        register_commands();
+        setup_textures();   // a lobby video can play at the menu, before any map
+    }
     static bool was_on = true;
     bool on = g_on.load();
     if (on != was_on) {
@@ -1537,6 +1517,10 @@ static void main_tick()
     }
     helper_connect(t);
     helper_poll();
+    if (stalled && g_playing_sent) {   // load it again: the hub resends the same link, which counts as already sent
+        g_playing_sent = false;
+        send_load();
+    }
     if (g_sock >= 0 && t - g_last_ping >= 1.0) { g_last_ping = t; helper_send("ping\n"); }
     if (t - g_last_where >= 0.5) {
         g_last_where = t;
@@ -1605,6 +1589,10 @@ static void render_tick()
         seen = seen || maybe_visible(eye, fwd, s->pos);
         chat_seen = chat_seen || maybe_visible(eye, fwd, chat_center(*s, s->right)) || maybe_visible(eye, fwd, chat_center(*s, -s->right));
     }
+    static double seen_at = -100;
+    if (seen) seen_at = t;
+    int view = t - seen_at < 1.0;
+    if (g_sock >= 0 && view != g_view_sent && helper_send("view %d\n", view)) g_view_sent = view;
     if (g_shm && g_sock >= 0 && seen) {
         uint64_t seq = __atomic_load_n(&g_shm->seq, __ATOMIC_ACQUIRE);
         if (seq != g_uploaded_seq && g_shm->latest <= 2) {
@@ -1641,13 +1629,7 @@ static void h_LevelInitPostEntity(IBaseClientDLL *self)
 {
     o_LevelInitPostEntity(self);
     pl_level_init();
-    ensure_texture();
-    if (!g_screen_mat) g_screen_mat = find_material("cstv/screen");
-    if (!g_chat_mat) g_chat_mat = find_material("cstv/chat");
-    if (!g_preview_mat) g_preview_mat = find_material("cstv/preview");
-    if (!g_outline_mat) g_outline_mat = find_material("cstv/outline");
-    if (!g_chat_see_mat) g_chat_see_mat = find_material("cstv/chat_see");
-    keep_bound(now_s(), true);
+    setup_textures();
 }
 
 static void h_LevelShutdown(IBaseClientDLL *self)
@@ -1658,7 +1640,6 @@ static void h_LevelShutdown(IBaseClientDLL *self)
     g_loc.clear();
     g_place.on = false;
     g_place_wait = 0;
-    gui_prog_level_end();
     pl_level_end();
     g_where_sent.clear();   // even back on the same server + map: the master then sends the screen and link again
     o_LevelShutdown(self);
@@ -1678,7 +1659,6 @@ static void h_FrameStageNotify(IBaseClientDLL *self, ClientFrameStage_t stage)
     if (stage == FRAME_RENDER_START) {
         render_tick();
         pl_frame();   // the Progress Log's run tracking (CS:TV on or off)
-        paint_tick();   // the paint mod's tick and hub lines
     }
     o_FrameStageNotify(self, stage);
 }
@@ -1853,6 +1833,7 @@ void *plat_swap_slot(void *obj, int slot, void *fn)
 
 intptr_t plat_connect()
 {
+    if (!cstv_run_dir_ok()) return -1;   // /tmp/cstv made by another user: its socket isn't our cstvd
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_un a = {};
     a.sun_family = AF_UNIX;
@@ -1871,6 +1852,7 @@ void plat_close(intptr_t s) { close((int)s); }
 
 void *plat_map(const char *name, size_t size)
 {
+    if (!cstv_run_dir_ok()) return nullptr;   // (all of cstvd's buffers are in /tmp/cstv)
     int fd = open(name, O_RDWR);
     if (fd < 0) return nullptr;
     struct stat st;   // shorter (cstvd between creating and sizing it): reading past the end would be SIGBUS
@@ -1949,16 +1931,6 @@ const char *plat_data_dir()
 
 bool plat_mkdir(const char *path) { return mkdir(path, 0755) == 0 || errno == EEXIST; }
 
-void *plat_module_symbol(const char *file, const char *symbol)
-{
-    std::string path = module_path((std::string("/") + file).c_str());   // (bhoptools loads it privately)
-    if (path.empty()) return nullptr;
-    void *h = dlopen(path.c_str(), RTLD_NOLOAD | RTLD_LAZY);
-    if (!h) return nullptr;
-    void *f = dlsym(h, symbol);
-    dlclose(h);   // (only the reference NOLOAD added: the module stays)
-    return f;
-}
 bool plat_rename(const char *from, const char *to) { return rename(from, to) == 0; }
 
 // The game's own libcurl (Steam's runtime has it; the engine downloads maps with it), so nothing extra ships.

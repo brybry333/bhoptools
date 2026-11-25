@@ -173,9 +173,6 @@ inline unsigned long long MonotonicMs()
 	return GetTickCount64();
 }
 
-// The options slider polls it while it's dragged.
-inline bool LeftMouseDown() { return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0; }
-
 // QueryPerformanceCounter, like Linux's CLOCK_MONOTONIC: GetTickCount64 only moves every 15.6 ms,
 // which made the every-frame jumpstats trainer step between ticks instead of gliding.
 inline double MonotonicSeconds()

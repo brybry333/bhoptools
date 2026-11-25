@@ -29,13 +29,15 @@ On/off switches: Options → bhoptools.
   - [CS:TV](https://github.com/brybry333/cstv): video screens (source in `cstv/`)
   - the Progress Log (`cstv_book`, `!prog`, `!progsave`): a practice diary per map, drawn as a Minecraft book. Works on
     every server, no plugin: the log is saved on your PC and runs are followed in the game, from the map's timer zones in
-    the public [zone list](https://github.com/srcwr/zones-cstrike) shavit servers use. The book's Minecraft pictures,
+    the public [zone list](https://github.com/srcwr/zones-cstrike) shavit servers use. Time practising = the time you're out
+    of the start zone with the run timer going. The book's Minecraft pictures,
     font and sounds come from Minecraft itself on your PC (a Minecraft install, else Mojang's download server, once);
     none of Mojang's files ship with bhoptools.
-  - [triggerlook](https://github.com/brybry333/triggerlook): the triggers a server shows, in your own look (`triggerlook_menu`)
+  - [triggerlook](https://github.com/brybry333/triggerlook): the map's triggers, clips, invisible walls and nodraw faces in
+    your own look, and a custom sky (a colour, a spray or a picture / GIF) (`triggerlook_menu`)
   - [p2paint](https://github.com/brybry333/p2paint): paint (`p2paint_menu`, hold `+paint`) on every server, no plugin:
-    your paint is saved on your PC, and other players on the same server who run bhoptools see it (and can copy it)
-    through cstv.xyz
+    your paint is saved on your PC. CONNECT TO... in the paint menu asks another bhoptools player on your server to paint
+    together (a group with a leader; paint log, kick, mute), over Steam, nothing else in between
 - keys in the game's own Options → Keyboard instead of fixed F-keys
 
 ## Build

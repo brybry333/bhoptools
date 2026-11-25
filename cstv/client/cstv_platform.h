@@ -39,13 +39,6 @@ bool plat_rename(const char *from, const char *to);         // replacing `to`
 // else null; *status = the HTTP status, 0 when there was no answer
 void plat_http_init();                                      // once, on the main thread, before any plat_http_get
 char *plat_http_get(const char *url, size_t *len, int *status);
-// an exported function of another module in the game (p2paint, loaded by bhoptools), or null while it isn't there
-#ifdef _WIN32
-#define PLAT_P2PAINT "p2paint.dll"
-#else
-#define PLAT_P2PAINT "p2paint.so"
-#endif
-void *plat_module_symbol(const char *file, const char *symbol);
 
 #ifdef _WIN32
 // The game's window is plain Win32 on Windows (SDL only handles controllers there), so its messages are

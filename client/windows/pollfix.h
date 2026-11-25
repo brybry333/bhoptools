@@ -1,5 +1,5 @@
-// High polling rate fix: the engine's message pump filtered the way Godot and PH3 do it, plus
-// counters for what the pump costs (bhoptools_pumpstats). Game thread only, apart from Init.
+// High polling rate fix: in game (not in menus), the engine's message pump filtered the way Godot and PH3
+// do it. Game thread only, apart from Init.
 #pragma once
 
 #include <Windows.h>
@@ -7,7 +7,7 @@
 namespace pollfix {
 
 // drain reads the raw input queue into the engine's accumulators and returns the reports read;
-// without one the fix stays unavailable and only the counters run.
+// without one the fix stays unavailable.
 // rawActive says every mouse report goes through OnRawMouse, which no-legacy mode needs for buttons.
 void Init(int (*drain)(), bool (*rawActive)());
 // Inside a Detours transaction.
@@ -17,10 +17,9 @@ void Detach();
 // its normal registration and release any buttons no-legacy posted down.
 void Shutdown();
 
-// From CInputSystem::WindowProc: learns the game's thread and window, counts the message.
+// From CInputSystem::WindowProc: learns the game's thread and window.
 // True for Shutdown's message, which the caller should not pass on.
 bool OnWindowMessage(HWND hwnd, UINT msg);
-void CountRaw(int reports);
 // Once a frame on the game thread: re-evaluates no-legacy if no recognised pump did, and turns it
 // off if none has been seen for 100 ms.
 void OnFrame();

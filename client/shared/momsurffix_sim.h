@@ -8,16 +8,13 @@
 #include <cstring>
 #include <xmmintrin.h>
 
-// bhoptools_msf. Unknown means stock TryPlayerMove.
+// Every server is taken to run the brybry333/MomSurfFix fork (fix3): the ground check fix, the working ramp
+// rescue, bevel_fix and disp_fix on. The defaults are its cvars'; bhoptools_msf replaces them.
 struct MsfSettings {
-	bool  known            = false;
 	int   bumpcount        = 8;
 	float retrace          = 0.2f;
 	bool  noclipWorkaround = true;
 	bool  windowsServer    = false;
-	// The SourceJump plugin's port of momsurffix2 d0bb295: bevel_fix and disp_fix on, and the one-plane
-	// clip in the air, where momsurffix2 has it.
-	bool  sourceJump       = false;
 };
 
 struct MsfMove {
@@ -310,14 +307,14 @@ inline int MsfTryPlayerMove(MsfWorld& w, const MsfSettings& s, const MsfMove& m,
 
 		if (firstDest && MsfIsEqual(end, firstDest)) {
 			pm = firstTrace;
-			if (s.sourceJump && pm->fraction < 1.0f && !pm->startsolid && pm->dispFlags != 0)
+			if (pm->fraction < 1.0f && !pm->startsolid && pm->dispFlags != 0)
 				MsfFixDispSeamPlane(w, origin, firstDest, *pm);
 		} else if (stuck_on_ramp && has_valid_plane) {
 			w.Trace(fixed_origin, end, nullptr, nullptr, *pm);
 			MsfCopy(valid_plane, pm->plane.normal);
 		} else {
 			w.Trace(origin, end, nullptr, nullptr, *pm);
-			if (s.sourceJump && pm->fraction < 1.0f && !pm->startsolid) {
+			if (pm->fraction < 1.0f && !pm->startsolid) {
 				if (pm->dispFlags != 0) MsfFixDispSeamPlane(w, origin, end, *pm);
 				else if (!m.onGround) MsfFixBevelPlane(w, origin, end, *pm);
 			}
@@ -371,7 +368,7 @@ inline int MsfTryPlayerMove(MsfWorld& w, const MsfSettings& s, const MsfMove& m,
 		MsfCopy(pm->plane.normal, planes[numplanes]);
 		numplanes++;
 
-		if (numplanes == 1 && m.walking && (s.sourceJump ? !m.onGround : m.onGround)) {
+		if (numplanes == 1 && m.walking && !m.onGround) {
 			float clipped[3];
 			if (planes[0][2] >= 0.7f) {
 				MsfClipVelocity(s, original_velocity, planes[0], clipped, 1.0f);

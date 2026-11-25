@@ -95,9 +95,11 @@ void Save()
 			fprintf(f, "%s=%d\n", fl.key, g_settings.*fl.value ? 1 : 0);
 	const bool ok = fclose(f) == 0;
 #ifdef _WIN32
-	if (ok) remove(path.c_str());
-#endif
+	// rename won't replace a file on Windows; this does, and a failure leaves the old one.
+	if (!ok || !MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+#else
 	if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+#endif
 		remove(tmp.c_str());
 		CoreLog("settings: couldn't write %s", path.c_str());
 	}

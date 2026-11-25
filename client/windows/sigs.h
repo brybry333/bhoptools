@@ -36,6 +36,10 @@ static const int VT_CCB_GetName   = 4;
 static const int VT_Cvar_Register = 6;
 static const int VT_Cvar_FindBase = 10;
 
+// IInputSystem (InputSystemVersion001) in the SDK header's order: its WindowProc calls slot 25 (ResetInputState) on
+// WM_ACTIVATEAPP, as the header has it.
+static const int VT_InputSystem_IsButtonDown = 11; // (ButtonCode_t) -> bool
+
 // One destructor slot, so GetRefEHandle is 2.
 static const int VT_IHandleEntity_GetRefEHandle = 2;
 

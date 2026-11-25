@@ -62,7 +62,8 @@ static wchar_t *os_wide(const char *s)   // malloc'd UTF-16 copy
 }
 #endif
 
-static void os_init_paths(void)
+// 0, or -1 when /tmp/cstv isn't this user's alone (another account made it)
+static int os_init_paths(void)
 {
 #ifdef _WIN32
     wchar_t w[1024];
@@ -79,11 +80,15 @@ static void os_init_paths(void)
     snprintf(os_run_dir, sizeof os_run_dir, "%s\\cstv", tmp);
     wchar_t *wd = os_wide(os_run_dir);
     if (wd) { CreateDirectoryW(wd, NULL); free(wd); }
+    return 0;
 #else
     ssize_t el = readlink("/proc/self/exe", os_exe_dir, sizeof os_exe_dir - 1);
     if (el > 0) { os_exe_dir[el] = 0; char *sl = strrchr(os_exe_dir, '/'); if (sl) *sl = 0; }
     snprintf(os_run_dir, sizeof os_run_dir, "%s", CSTV_DIR);
     mkdir(os_run_dir, 0700);
+    struct stat st;   // ours but group/other-writable (an older overlay under umask 002): tighten it
+    if (!lstat(os_run_dir, &st) && S_ISDIR(st.st_mode) && st.st_uid == getuid() && (st.st_mode & 022)) chmod(os_run_dir, 0700);
+    return cstv_run_dir_ok() ? 0 : -1;
 #endif
 }
 
@@ -243,7 +248,8 @@ static int os_spawn(const char *const argv[], int *in_fd, int out, int *out_fd, 
     HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL, nul_in = NULL, nul_out = NULL;
     int ok = 0;
     if (in_fd) {
-        if (!CreatePipe(&in_r, &in_w, &sa, 0)) goto done;
+        // shortcut: a full pipe still blocks the writer, make it non-blocking if a stalled reader ever freezes cstvd here
+        if (!CreatePipe(&in_r, &in_w, &sa, 1 << 20)) goto done;
         SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
     } else {
         nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);

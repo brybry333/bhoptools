@@ -10,7 +10,7 @@ namespace pf {
 enum Field {
 	BaseVelocity, Velocity, AbsVelocity, Flags, Gravity, TickBase, LifeState, MoveType,
 	Local, Ducked, Ducking, Ducktime, StepSize,
-	WaterLevel, GroundEntity, WaterJumpTime, SurfaceFriction, Stamina, ViewOffset,
+	WaterLevel, GroundEntity, WaterJumpTime, SurfaceFriction, Stamina, ViewOffset, LadderNormal,
 	kCount
 };
 
@@ -27,6 +27,7 @@ inline const char* Name(Field f)
 		"m_vecBaseVelocity", "m_vecVelocity", "m_vecAbsVelocity", "m_fFlags", "m_flGravity", "m_nTickBase", "m_lifeState", "m_MoveType",
 		"m_Local", "m_bDucked", "m_bDucking", "m_flDucktime", "m_flStepSize",
 		"m_nWaterLevel", "m_hGroundEntity", "m_flWaterJumpTime", "m_surfaceFriction", "m_flStamina", "m_vecViewOffset",
+		"m_vecLadderNormal",
 	};
 	return kNames[f];
 }
@@ -54,6 +55,7 @@ inline Offsets Resolve(const std::vector<MemRange>& segs)
 		{ Name(SurfaceFriction), FIELD_FLOAT,     4,  {}, 0, -1 },
 		{ Name(Stamina),         FIELD_FLOAT,     4,  {}, 0, -1 },
 		{ Name(ViewOffset),      FIELD_VECTOR,    12, {}, 0, -1 },
+		{ Name(LadderNormal),    FIELD_VECTOR,    12, {}, 0, -1 },
 	};
 	Offsets o;
 	for (int i = 0; i < kCount; ++i) o.at[i] = -1;

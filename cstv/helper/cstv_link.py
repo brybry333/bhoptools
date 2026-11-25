@@ -92,7 +92,7 @@ class WS:
         hdrs = {l.split(":", 1)[0].strip().lower(): l.split(":", 1)[1].strip() for l in lines[1:] if ":" in l}
         if hdrs.get("sec-websocket-accept") != accept:
             raise ConnectionError("bad handshake answer")
-        self.sock.settimeout(None)
+        self.sock.settimeout(30)   # a stalled hub ends the link (cstvd pings every 5 s), a send never hangs for good
         self.wlock = threading.Lock()
 
     def _frame(self, opcode, payload):

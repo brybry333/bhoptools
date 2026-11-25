@@ -17,6 +17,7 @@
 #include "options_tab.h"
 #include "settings.h"
 
+#include <algorithm>
 #include <climits>
 #include <cctype>
 #include <cmath>
@@ -53,9 +54,8 @@ const int kServerAutosync = 1 << 13;
 const int kServerZones    = 1 << 16;
 const int kServerTeleportView = 1 << 17;
 const int kServerHold = 1 << 18;
-// The SourceJump plugin's landfix (bhoptools_move landfix 3) and momsurffix2 d0bb295 with bevel_fix and disp_fix.
+// The SourceJump plugin's landfix (bhoptools_move landfix 3). 1 << 25, its momsurffix, isn't read: the fork's always is.
 const int kServerSjLandfix = 1 << 24;
-const int kServerSjMsf     = 1 << 25;
 // SourceJump's eventqueue makes a func_button's attacker the activator of its OnDamaged.
 const int kServerSjButtons = 1 << 26;
 // bhoptools_hello flags
@@ -136,6 +136,7 @@ struct Slot {
 	int     flags;
 	Vec     origin, velocity, angles;
 	float   ducktime, stamina, gravity;
+	Vec     ladderNormal; // ours at the save, zero if unknown: the server's isn't sent
 };
 
 struct Turn { int key; float d; float eff; int left; };
@@ -147,6 +148,7 @@ struct Offsets {
 	int tickbase, flags, stamina, ducked, ducking, ducktime;
 	int baseVelocity, velocity, absVelocity, lifeState, moveType, gravity;
 	int currentCommand;
+	int ladderNormal; // optional, <= 0 when not found
 };
 
 // On Linux written on the installer thread, read only after preload publishes the install flag.
@@ -578,18 +580,24 @@ void Remember(Slot& s)
 	if (!ValidCpIndex(s.index)) return;
 	if ((int)g_cps.size() <= s.index) g_cps.resize(s.index + 1);
 	Slot& m = g_cps[s.index];
-	if (m.index && memcmp(&m.origin, &s.origin, sizeof(Vec)) == 0) s.id = m.id;
+	if (m.index && memcmp(&m.origin, &s.origin, sizeof(Vec)) == 0) {
+		s.id = m.id;
+		if (s.ladderNormal.x == 0.0f && s.ladderNormal.y == 0.0f && s.ladderNormal.z == 0.0f) s.ladderNormal = m.ladderNormal;
+	}
 	m = s;
 }
 
-// Whether a trigger sim snapshot id can still be teleported to.
-bool SnapshotInUse(int id)
+// The trigger sim snapshot ids that can still be teleported to, sorted.
+const std::vector<int>& SnapshotsInUse()
 {
-	for (int i = 0; i < g_slotCount; ++i)
-		if (g_slots[i].id == id) return true;
+	static std::vector<int> ids;
+	ids.clear();
+	for (int i = 0; i < g_slotCount; ++i) ids.push_back(g_slots[i].id);
 	for (const Slot& s : g_cps)
-		if (s.index && s.id == id) return true;
-	return g_hold.active && g_hold.slot.id == id;
+		if (s.index) ids.push_back(s.id);
+	if (g_hold.active) ids.push_back(g_hold.slot.id);
+	std::sort(ids.begin(), ids.end());
+	return ids;
 }
 
 // <flags> <x> <y> <z> <pitch> <yaw> <gravity> <laggedmovement> from argument `first`, floats as bits.
@@ -842,17 +850,18 @@ void Cmd_LandfixSkip(const CCommandX& c)
 }
 
 // bhoptools_msf <session> <loaded> <bumpcount> <retrace length, float bits> <noclip workaround> <os, 1 Windows>
+// Not loaded keeps the fork's defaults.
 void Cmd_Msf(const CCommandX& c)
 {
 	if (c.argc < 7 || !g_caps || !(g_serverFlags & kServerMsf) || ArgInt(c, 1) != g_session) return;
 	MsfSettings s;
-	s.known            = ArgInt(c, 2) != 0;
-	s.bumpcount        = Clamp(ArgInt(c, 3), 4, 16);
-	const float retrace = ArgHexFloat(c, 4);
-	s.retrace          = retrace < 0.2f ? 0.2f : (retrace > 5.0f ? 5.0f : retrace);
-	s.noclipWorkaround = ArgInt(c, 5) != 0;
-	s.windowsServer    = ArgInt(c, 6) == 1;
-	s.sourceJump       = (g_serverFlags & kServerSjMsf) != 0;
+	if (ArgInt(c, 2) != 0) {
+		s.bumpcount        = Clamp(ArgInt(c, 3), 4, 16);
+		const float retrace = ArgHexFloat(c, 4);
+		s.retrace          = retrace < 0.2f ? 0.2f : (retrace > 5.0f ? 5.0f : retrace);
+		s.noclipWorkaround = ArgInt(c, 5) != 0;
+		s.windowsServer    = ArgInt(c, 6) == 1;
+	}
 	msf::SetSettings(s, true);
 }
 
@@ -1631,6 +1640,7 @@ void Save(void* player, void* mv, int key)
 	s->ducktime = Field<float>(player, g_off.ducktime);
 	s->stamina  = Field<float>(player, g_off.stamina);
 	s->gravity  = Field<float>(player, g_off.gravity);
+	if (g_off.ladderNormal > 0) s->ladderNormal = Field<Vec>(player, g_off.ladderNormal);
 	s->selected = false;
 	s->index    = CountWithPending(key);
 	Remember(*s);
@@ -1667,6 +1677,9 @@ void Restore(void* player, void* mv, const Slot& s, int restore)
 	Field<float>(player, g_off.stamina)    = s.stamina;
 	// kzcheckpoints returns before SetEntityGravity.
 	if (!s.kz) Field<float>(player, g_off.gravity) = s.gravity;
+	// LadderMove follows the saved ladder; shavit's ladder suppression timer isn't in the client's datamaps.
+	const Vec& ln = s.ladderNormal;
+	if (g_off.ladderNormal > 0 && (ln.x != 0.0f || ln.y != 0.0f || ln.z != 0.0f)) Field<Vec>(player, g_off.ladderNormal) = ln;
 	// TeleportEntity with a velocity zeroes the base velocity too.
 	Field<Vec>(player, g_off.baseVelocity) = Vec{ 0, 0, 0 };
 	SetVelocity(player, vel);
@@ -2010,8 +2023,8 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		} else {
 			Save(player, mv, key);
 			TeleportPredict_OnCheckpointSave(FindSlot(key)->id);
-			TeleportPredict_PruneCheckpoints(SnapshotInUse);
 			if (firstRun) {
+				TeleportPredict_PruneCheckpoints(SnapshotsInUse());
 				if (!menuSave) PrintSaved(key);
 				RedrawMenu();
 			}
@@ -2051,6 +2064,7 @@ bool ResolveOffsets()
 	g_off.moveType     = f[pf::MoveType];
 	g_off.gravity      = f[pf::Gravity];
 	g_off.absVelocity  = f[pf::AbsVelocity];
+	g_off.ladderNormal = f[pf::LadderNormal];
 
 	const uintptr_t store = FindPatternIn(CLIENT_MODULE, SIG_StartCommandStore);
 	g_off.currentCommand = store ? *reinterpret_cast<const int*>(store + OFF_StartCommandStore_Disp) : 0;

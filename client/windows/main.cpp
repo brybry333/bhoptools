@@ -83,11 +83,9 @@ bool (*g_cstvRawMotion)(int, int);
 wchar_t g_triggerlookDll[MAX_PATH];
 void (*g_triggerlookEnable)(bool);
 // paint (p2paint) the same way: p2paint.dll next to bhoptools.exe (maretf.exe beside it turns pictures into paint).
-// It starts itself like triggerlook; p2paint_enable is the Options switch, p2paint_server greys its row out.
+// It starts itself like triggerlook; p2paint_enable is the Options switch.
 wchar_t g_p2paintDll[MAX_PATH];
 void (*g_p2paintEnable)(bool);
-int (*g_p2paintServer)();
-int PaintServerState() { return g_p2paintServer ? g_p2paintServer() : -1; }
 std::atomic<bool> g_hotkeyReady;
 
 void speedo::HotkeyAction(int key)
@@ -141,7 +139,6 @@ int DrainRawInput()
 			AddRawMouse(ri);
 		total += n;
 	}
-	pollfix::CountRaw(total);
 	return total;
 }
 
@@ -157,9 +154,8 @@ int DrainRawInputForPump()
 {
 	if (rawprecise::On())
 	{
-		const int reports = rawprecise::FlushButtons();
-		pollfix::CountRaw(reports);
-		return reports + DrainRawInput();
+		rawprecise::FlushButtons();
+		return DrainRawInput();
 	}
 	const int n = DrainRawInput();
 	if (n && Plat_FloatTime)
@@ -238,10 +234,37 @@ bool __fastcall Hooked_GetRawMouseAccumulators(void* thisptr, int& accumX, int& 
 }
 
 
+// Every mouse message carries the buttons Windows thinks are down, and the game presses and releases its mouse
+// buttons to match, even on a plain move. No-legacy (pollfix) can leave that stale: a click that went down as a
+// message and came up as raw input only stays down for Windows. The first move after no-legacy went off (Alt+Tab)
+// then held MOUSE1 for good: the gun kept firing in the background. So a message presses only its own button;
+// the others it may only release.
+WPARAM OnlyOwnButtonPresses(void* inputSystem, UINT uMsg, WPARAM wParam)
+{
+	WPARAM own = 0;
+	switch (uMsg)
+	{
+	case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: own = MK_LBUTTON; break;
+	case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: own = MK_RBUTTON; break;
+	case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: own = MK_MBUTTON; break;
+	case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK: own = HIWORD(wParam) == XBUTTON1 ? MK_XBUTTON1 : MK_XBUTTON2; break;
+	}
+	// ButtonCode_t MOUSE_LEFT is 107, then right, middle, 4, 5.
+	const struct { WPARAM mk; int code; } buttons[] = {
+		{ MK_LBUTTON, 107 }, { MK_RBUTTON, 108 }, { MK_MBUTTON, 109 }, { MK_XBUTTON1, 110 }, { MK_XBUTTON2, 111 },
+	};
+	for (const auto& b : buttons)
+		if ((wParam & b.mk) && b.mk != own && !VFunc<bool (*)(void*, int)>(inputSystem, VT_InputSystem_IsButtonDown)(inputSystem, b.code))
+			wParam &= ~b.mk;
+	return wParam;
+}
+
 LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (pollfix::OnWindowMessage(hwnd, uMsg))
 		return 0;
+	if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST && uMsg != WM_MOUSEWHEEL && uMsg != WM_MOUSEHWHEEL)
+		wParam = OnlyOwnButtonPresses(thisptr, uMsg, wParam);
 	if (rawprecise::OnWindowMessage(hwnd, uMsg))
 		return 0;
 	// Does what CInputSystem::WindowProc would (add lLastX/Y to its accumulators), then takes the
@@ -610,6 +633,14 @@ DWORD InjectionEntryPoint(DWORD processID)
 		CoreLog("-insecure is not on the command line, not installing");
 		return 0;
 	}
+	// bhoptools.exe started again while the game runs injects a second copy: only the first one installs.
+	const HANDLE inGame = CreateMutexA(nullptr, FALSE, "bhoptools_in_game");
+	if (inGame && GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		CoreLog("bhoptools already runs in this game, not installing again");
+		CloseHandle(inGame);
+		return 0;
+	}
 
 	// The launcher injects as soon as client.dll is in the module list, which can be
 	// before CHLClient::Init has registered m_rawinput.
@@ -831,7 +862,10 @@ DWORD InjectionEntryPoint(DWORD processID)
 	CloseHandle(CreateThread(nullptr, 0, StartupFetchThread, nullptr, 0, nullptr));
 	if (g_curtimefixDll[0])
 	{
-		const HMODULE h = LoadLibraryW(g_curtimefixDll);
+		// A copy already loaded on its own: drive that one (ours would stay idle beside it).
+		HMODULE h = GetModuleHandleW(L"curtimefix.dll");
+		if (!h)
+			h = LoadLibraryW(g_curtimefixDll);
 		g_curtimefixEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "curtimefix_enable")) : nullptr;
 		if (g_curtimefixEnable)
 			g_curtimefixEnable(settings::Get().curtimefix);
@@ -863,7 +897,6 @@ DWORD InjectionEntryPoint(DWORD processID)
 	{
 		const HMODULE h = LoadLibraryW(g_p2paintDll);
 		g_p2paintEnable = h ? reinterpret_cast<void (*)(bool)>(GetProcAddress(h, "p2paint_enable")) : nullptr;
-		g_p2paintServer = h ? reinterpret_cast<int (*)()>(GetProcAddress(h, "p2paint_server")) : nullptr;
 		if (g_p2paintEnable)
 			g_p2paintEnable(settings::Get().paint);	// (before it's up: it applies it when it starts)
 		else
@@ -992,6 +1025,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 	}
 	pollfix::Detach();
 	DetourTransactionCommit();
+	if (inGame)
+		CloseHandle(inGame);
 
 	ExitThread(0);
 	return 0;
@@ -1414,7 +1449,17 @@ int main()
 	HANDLE game = NULL;
 	DWORD game_pid = 0;
 
-	if (!FindGameProcess(0) && !getenv("BHOPTOOLS_DIRECT"))
+	if (const DWORD running = FindGameProcess(0))
+	{
+		// A second game would only say one is running already and quit.
+		game = OpenProcess(PROCESS_ALL_ACCESS, FALSE, running);
+		if (game)
+		{
+			game_pid = running;
+			LogTime("the game is already running, using it");
+		}
+	}
+	else if (!getenv("BHOPTOOLS_DIRECT"))
 	{
 		PROCESS_INFORMATION spi = {};
 		STARTUPINFOA ssi = {};
@@ -1502,7 +1547,7 @@ int main()
 		}
 	}
 
-	printf("Options > bhoptools switches mouse interpolation (it sets m_rawinput) and the rest\n\nF8 toggles all client-side prediction: triggers, rngfix, checkpoints, HUD speed (on by default)\nBunnyhopAPE autobhop prediction (off by default) has no key until you set one\nKeys: Options > Keyboard > bhoptools\n");
+	printf("Options > bhoptools switches mouse interpolation (it sets m_rawinput) and the rest\n\nF8 toggles all client-side prediction: triggers, rngfix, checkpoints, HUD speed (on by default)\nBunnyhopAPE autobhop prediction (off by default) has no key until you set one\nKeys: Options > Keyboard > bhoptools\n\nKeep this window open while you play: closing it turns bhoptools off in the game.\n");
 
 	LogTime("client.dll loaded, injecting");
 	PEInjector(game, InjectionEntryPoint);

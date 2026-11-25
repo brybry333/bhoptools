@@ -14,7 +14,7 @@ struct Settings {
 	bool hudkeys   = true;
 	bool jsframe   = false;  // client-drawn compact trainers redrawn every frame instead of every tick
 	bool chatglyphs = true;  // Linux only
-	bool pollfix   = true;   // Windows only: no legacy mouse messages in game, the message pump filtered in menus
+	bool pollfix   = true;   // Windows only: in game, no legacy mouse messages and a filtered message pump
 	bool rawprecise = false; // Windows only: mouse reports timestamped on their own thread, each tick takes its own
 	bool curtimefix = true; // curtimefix on/off, if libcurtimefix.so / curtimefix.dll sits next to bhoptools
 	bool cstv      = true;   // CS:TV (video screens) on/off, if CS:TV is installed with bhoptools
