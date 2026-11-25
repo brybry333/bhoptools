@@ -6,7 +6,8 @@
 // book's settings. A server that still runs the plugin is ignored (its `prog_ui` lines are dropped).
 //
 // Runs, as shavit times them, from what this client sees:
-//   - the map's timer zones: shavit's start / end boxes per track from the public zone list
+//   - the map's timer zones: shavit's start / end boxes per track. The server's own when its bhoptools plugin
+//     publishes them (they're what times you), else the public zone list
 //     (https://github.com/srcwr/zones-cstrike, the list shavit servers load by default; cached for a week);
 //   - the local player's position and life (entity list, netvars), and a clock of our own (seconds);
 //   - leaving a start zone = a run from Start (time 0); a start zone again = restart; the end zone of the run's track
@@ -20,6 +21,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,6 +44,7 @@
 #include "icliententity.h"
 #include "client_class.h"
 #include "dt_recv.h"
+#include "networkstringtabledefs.h"
 
 #include "cstv_gui.h"
 #include "cstv_platform.h"
@@ -61,6 +64,7 @@ const char *const PREFIX = " \x04[Prog]\x01 ";
 IVEngineClient *g_eng;
 IBaseClientDLL *g_cli;
 IClientEntityList *g_ents;
+INetworkStringTableContainer *g_tables;
 
 void chat(const char *fmt, ...)
 {
@@ -534,6 +538,9 @@ std::mutex g_zmu;
 std::vector<Zone> g_zones;          // this map's (guarded by g_zmu: the fetch thread fills it)
 std::string g_zone_map;             // the map they're for
 std::string g_zone_status = "none"; // for pl_debug
+bool g_zones_server;                // g_zones are the server's: the zone list's answers are ignored
+std::string g_srv_header;           // the server's zone list last read (its header changes with the list)
+double g_srv_polled = 0;
 std::vector<Vec3> g_dests;          // where the map's trigger_teleports send you
 
 // a minimal JSON reader: enough for the zone list
@@ -648,7 +655,7 @@ std::string g_fetch_map;   // handed to the thread (set before it starts)
 void zones_ready(const std::string &map, std::vector<Zone> z, const char *status)
 {
     std::lock_guard<std::mutex> l(g_zmu);
-    if (map != g_zone_map) return;   // the map changed meanwhile
+    if (map != g_zone_map || g_zones_server) return;   // the map changed meanwhile, or the server sent its own
     g_zones = std::move(z);
     char b[96];
     int st = 0, en = 0;
@@ -673,8 +680,8 @@ void *fetch_thread(void *)
         zones_ready(map, z, "no zones for this map in the zone list");
     } else {   // no good answer: the zones the cache gave stay
         std::lock_guard<std::mutex> l(g_zmu);
-        if (map == g_zone_map)
-            g_zone_status = std::string(status ? "zone list: bad answer" : "zone list: no connection") + ", kept " + std::to_string(g_zones.size()) + " cached zones";
+        if (map == g_zone_map && !g_zones_server)
+            g_zone_status =std::string(status ? "zone list: bad answer" : "zone list: no connection") + ", kept " + std::to_string(g_zones.size()) + " cached zones";
     }
     free(body);
     return nullptr;
@@ -686,8 +693,11 @@ void load_zones(const std::string &map)
         std::lock_guard<std::mutex> l(g_zmu);
         g_zone_map = map;
         g_zones.clear();
+        g_zones_server = false;
         g_zone_status = "loading";
     }
+    g_srv_header.clear();
+    g_srv_polled = 0;
     std::string cache = zone_cache(map), text;
     time_t age = file_age(cache);
     std::vector<Zone> z;
@@ -698,6 +708,101 @@ void load_zones(const std::string &map)
     g_fetch_map = map;
     plat_http_init();
     if (!plat_thread(fetch_thread)) zones_ready(map, z, "zone list: no thread");
+}
+
+// The server's own zones: its bhoptools plugin publishes shavit's zone list in the InfoPanel string table
+// (bhoptools/zones.sp + tables.sp): "bhoptools_zones" = "<parts> <crc32> <format> <list number>", the text in
+// "bhoptools_zones_0".. One zone a line: type track form data hammerid origin[3] half[3] dest[3], floats as their bits
+// in hex (SourcePawn's %x: a negative cell gets a minus sign). Read like bhoptools' prediction reads it (PollZones).
+std::string table_data(INetworkStringTable *t, const char *name)
+{
+    int i = t->FindStringIndex(name);
+    if (i < 0 || i == INVALID_STRING_INDEX) return "";
+    int len = 0;
+    const char *p = (const char *)t->GetStringUserData(i, &len);
+    return p && len > 0 ? std::string(p, (size_t)len) : "";
+}
+
+uint32_t crc32_of(const std::string &s)   // zlib's, as the plugin takes it
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned char c : s) {
+        crc ^= c;
+        for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+float hex_float(const char *s)
+{
+    bool neg = *s == '-';
+    if (neg) s++;
+    uint32_t bits = 0;
+    for (;; s++) {
+        int d = *s >= '0' && *s <= '9' ? *s - '0' : *s >= 'a' && *s <= 'f' ? *s - 'a' + 10 : *s >= 'A' && *s <= 'F' ? *s - 'A' + 10 : -1;
+        if (d < 0) break;
+        bits = bits << 4 | (uint32_t)d;
+    }
+    if (neg) bits = 0u - bits;
+    float f;
+    memcpy(&f, &bits, 4);
+    return std::isfinite(f) && fabsf(f) < 1e6f ? f : 0.0f;
+}
+
+void poll_server_zones()
+{
+    double now = plat_now();
+    if (!g_tables || M.map.empty() || now - g_srv_polled < 0.5) return;
+    g_srv_polled = now;
+    INetworkStringTable *t = g_tables->FindTable("InfoPanel");
+    std::string head = t ? table_data(t, "bhoptools_zones") : "";
+    if (head.empty() || head == g_srv_header) return;
+    int parts = 0, crc = 0, used = 0, format = 0, list = 0;
+    if (sscanf(head.c_str(), "%d %d %n", &parts, &crc, &used) != 2 || sscanf(head.c_str() + used, "%d %d", &format, &list) != 2
+        || format != 1 || parts < 0 || parts > 4096)
+        return;
+    std::string text;
+    for (int i = 0; i < parts; i++) {
+        std::string part = table_data(t, ("bhoptools_zones_" + std::to_string(i)).c_str());
+        if (part.empty()) return;   // not all here yet: read again next time
+        text += part;
+    }
+    if ((int)crc32_of(text) != crc) return;
+    g_srv_header = head;
+    std::vector<Zone> z;
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t e = text.find('\n', p);
+        if (e == std::string::npos) e = text.size();
+        std::vector<std::string> f;
+        for (size_t a = p; a < e;) {
+            size_t b = text.find(' ', a);
+            if (b == std::string::npos || b > e) b = e;
+            if (b > a) f.push_back(text.substr(a, b - a));
+            a = b + 1;
+        }
+        p = e + 1;
+        if (f.size() < 14) continue;
+        int type = atoi(f[0].c_str()), form = atoi(f[2].c_str());
+        if ((type != 0 && type != 1) || form > 2) continue;   // start / end; boxes and hooked triggers, not buttons
+        Zone zone = {type, atoi(f[1].c_str()), {}, {}};
+        for (int i = 0; i < 3; i++) {   // the box as bhoptools touches it: a unit wider (ZsBoxTouches)
+            float o = hex_float(f[5 + i].c_str()), h = hex_float(f[8 + i].c_str());
+            zone.lo[i] = o - h - 1;
+            zone.hi[i] = o + h + 1;
+        }
+        z.push_back(zone);
+    }
+    // an empty list (published before shavit loaded the map's zones) doesn't replace the zone list's
+    if (z.empty()) return;
+    std::lock_guard<std::mutex> l(g_zmu);
+    g_zones_server = true;
+    g_zones = std::move(z);
+    int st = 0, en = 0;
+    for (const Zone &q : g_zones) (q.type ? en : st)++;
+    char b[96];
+    snprintf(b, sizeof b, "the server's zones (list %d): %d start, %d end", list, st, en);
+    g_zone_status = b;
 }
 
 // the BSP's entity lump: where trigger_teleports send you (their target's origin)
@@ -893,7 +998,7 @@ void progsave()
 {
     double now = plat_now();
     if (!R.att || R.state != R_RUN) {
-        if (!have_zones()) chat("This map's timer zones aren't known (no zone list for it), so runs can't be followed here. Type them: \x04!prog 2:24 to 4:02\x01.");
+        if (!have_zones()) chat("This map's timer zones aren't known (the server doesn't send them and the public zone list hasn't got this map), so runs can't be followed here. Type them: \x04!prog 2:24 to 4:02\x01.");
         else if (!R.lost.empty()) chat("%s", R.lost.c_str());
         else chat("Start a run or load a checkpoint first.");
         return;
@@ -1046,6 +1151,7 @@ void pl_setup(IVEngineClient *engine, IBaseClientDLL *client, IClientEntityList 
     g_eng = engine;
     g_cli = client;
     g_ents = ents;
+    g_tables = (INetworkStringTableContainer *)plat_interface("engine", INTERFACENAME_NETWORKSTRINGTABLECLIENT);
     if (!S.loaded) load_settings();
 }
 
@@ -1071,12 +1177,18 @@ void pl_level_end()
 {
     if (M.t_unsaved > 0) save_map();
     M.map.clear();
+    g_srv_header.clear();
     std::lock_guard<std::mutex> l(g_zmu);
     g_zone_map.clear();
     g_zones.clear();
+    g_zones_server = false;
 }
 
-void pl_frame() { tick(); }
+void pl_frame()
+{
+    poll_server_zones();
+    tick();
+}
 
 // prog_zones: this map's zones downloaded again now (the list may have changed; or to see why there are none)
 void pl_refetch_zones()
@@ -1084,6 +1196,10 @@ void pl_refetch_zones()
     if (M.map.empty()) return;
     {
         std::lock_guard<std::mutex> l(g_zmu);
+        if (g_zones_server) {
+            cstv_chat_line((std::string(PREFIX) + "This server sends its own timer zones, so the zone list isn't used here (prog_debug shows them).").c_str());
+            return;
+        }
         g_zone_status = "downloading again";
     }
     g_fetch_map = M.map;
