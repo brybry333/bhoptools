@@ -339,6 +339,8 @@ static int sdl_scancode(WPARAM vk, LPARAM lp)
     return 0;
 }
 
+bool plat_ctrl_down() { return GetKeyState(VK_CONTROL) < 0; }
+
 int plat_scancode_from_name(const char *name)
 {
     if (name[0] && !name[1]) {

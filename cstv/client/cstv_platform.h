@@ -51,4 +51,5 @@ void plat_input_window(bool open);                          // the CS:TV window 
 char *plat_clipboard_get();                                 // malloc'd UTF-8, or null
 int plat_clipboard_set(const char *utf8);
 int plat_scancode_from_name(const char *name);              // an SDL scancode for a Source key name, or 0
+bool plat_ctrl_down();                                      // Ctrl is held right now
 #endif

@@ -73,7 +73,7 @@ static std::vector<std::string> g_pdays;         // days with entries, oldest fi
 // ids: inputs 900-999 (picked whole when arrived at by keys), buttons and links 1000-1999, rows 100000 + entry id
 // (page 1) and 200000 + spot index (page 4)
 enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2, PI_PAST = 930 };
-enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_FILTER, PB_CHATSND_YES = 1016, PB_CHATSND_NO, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
+enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_FILTER, PB_CHATSND_YES = 1016, PB_CHATSND_NO, PB_PAST, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
        PB_A_NEXT, PB_B_PREV, PB_B_NEXT, PB_SPOT_ADD = 1030, PB_SPOT_CANCEL, PB_SPOT_DEL, PB_END2 = 1040, PB_AUTO_YES, PB_AUTO_NO,
        PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_AUTOSAVE_YES, PB_AUTOSAVE_NO, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
 enum { PR_ENTRY = 100000, PR_SPOT = 200000 };
@@ -948,7 +948,7 @@ static bool p_button(int id, int x, int y, int w, const std::string &label, bool
 // Minecraft's slider, as its options draw it: the dark (disabled) button as the track, an 8 px slice of the button as
 // the knob (highlighted under the mouse), the value written on it in white. A click or drag moves it: t (0..1) follows
 // the mouse while the button is held (true then); *released on the frame it's let go (with the button's click).
-static bool p_slider(int id, int x, int y, int w, float &t, const std::string &label, bool *released)
+static bool p_slider(int id, int x, int y, int w, float &t, const std::string &label, bool *released, bool lit = false)
 {
     int W = BT(w), H = BT(20), K = BT(8);
     if (take_click(x, y, W, H)) g_drag = id;
@@ -962,7 +962,7 @@ static bool p_slider(int id, int x, int y, int w, float &t, const std::string &l
             p_sound("click");
         }
     }
-    bool hv = drag || hover(x, y, W, H);
+    bool hv = drag || lit || hover(x, y, W, H);
     int kx = x + (int)(std::min(std::max(t, 0.0f), 1.0f) * (W - K));
     if (g_part) {
         int half = w / 2;
@@ -999,6 +999,8 @@ static bool p_link(int id, int x, int y, const std::string &label, bool enabled 
 
 // typed straight onto the page, as in a book and quill: the text and Minecraft's blinking _ after it, a dotted
 // line under it to show where. True when Enter is pressed in it.
+static bool p_type(int id, std::string &s, size_t maxlen);
+
 static bool p_input(int id, std::string &s, size_t maxlen, int x, int y, int w, const char *hint)
 {
     int h = mt_h(F_MC) + BT(3);
@@ -1006,8 +1008,32 @@ static bool p_input(int id, std::string &s, size_t maxlen, int x, int y, int w, 
     if (g_pall != g_focus) g_pall = 0;
     bool hv = hover(x, y - BT(2), w, h + BT(2));
     if (take_click(x, y - BT(2), w, h + BT(2))) { g_focus = id; g_pall = 0; }
-    bool focused = g_focus == id, enter = false;
-    if (focused) {
+    bool focused = g_focus == id, enter = focused && p_type(id, s, maxlen);
+    Col line = focused ? M_INK : hv ? M_DIM : M_FAINT;
+    for (int dx = 0; dx + BT(1) <= w; dx += BT(2)) rect(x + dx, y + h - BT(1), BT(1), BT(1), line);
+    if (s.empty() && !focused) {
+        mt(F_MC, x, y, M_FAINT, hint, w);
+        return false;
+    }
+    std::string t = s;   // its end, when it doesn't fit
+    int room = w - mt_w(F_MC, "_");
+    while (!t.empty() && mt_w(F_MC, t) > room) {
+        size_t i = 1;
+        while (i < t.size() && ((unsigned char)t[i] & 0xC0) == 0x80) i++;
+        t.erase(0, i);
+    }
+    bool picked = focused && g_pall == id && !t.empty();
+    if (picked) rect(x - BT(1), y - BT(1), mt_w(F_MC, t) + BT(2), mt_h(F_MC) + BT(1), M_PICK);
+    mt(F_MC, x, y, picked ? M_WHITE : M_INK, t);
+    if (focused && !picked && (long)(plat_now() / 0.3) % 2 == 0) mt(F_MC, x + mt_w(F_MC, t), y, M_INK, "_");
+    return enter;
+}
+
+// the keys typed into the focused field (id): text, Backspace, Ctrl+V (picked text first), Enter (true)
+static bool p_type(int id, std::string &s, size_t maxlen)
+{
+    bool enter = false;
+    {
         std::string add = in.typed;
         if (in.paste && SDL_GetClipboardText_) {
             if (char *clip = SDL_GetClipboardText_()) {
@@ -1031,23 +1057,31 @@ static bool p_input(int id, std::string &s, size_t maxlen, int x, int y, int w, 
         in.backspaces = 0;
         in.paste = in.enter = false;
     }
-    Col line = focused ? M_INK : hv ? M_DIM : M_FAINT;
-    for (int dx = 0; dx + BT(1) <= w; dx += BT(2)) rect(x + dx, y + h - BT(1), BT(1), BT(1), line);
-    if (s.empty() && !focused) {
-        mt(F_MC, x, y, M_FAINT, hint, w);
-        return false;
-    }
+    return enter;
+}
+
+// Minecraft's text field (its EditBox): black inside a grey border (white while typing in it), the text light grey
+// with its shadow and a blinking _ after it, the hint in grey when empty. Typed as p_input; true on Enter.
+static bool p_editbox(int id, std::string &s, size_t maxlen, int x, int y, int w, const char *hint)
+{
+    int W = BT(w), H = BT(20);
+    if (g_pall != g_focus) g_pall = 0;
+    if (take_click(x, y, W, H)) { g_focus = id; g_pall = 0; }
+    bool focused = g_focus == id, enter = focused && p_type(id, s, maxlen);
+    rect(x, y, W, H, focused ? M_WHITE : Col{160, 160, 160, 255});
+    rect(x + BT(1), y + BT(1), W - BT(2), H - BT(2), Col{0, 0, 0, 255});
+    int tx = x + BT(4), ty = y + BT(6), room = W - BT(8) - mt_w(F_MC, "_");
     std::string t = s;   // its end, when it doesn't fit
-    int room = w - mt_w(F_MC, "_");
     while (!t.empty() && mt_w(F_MC, t) > room) {
         size_t i = 1;
         while (i < t.size() && ((unsigned char)t[i] & 0xC0) == 0x80) i++;
         t.erase(0, i);
     }
+    if (t.empty()) p_stext(F_MC, tx, ty, Col{128, 128, 128, 255}, hint, W - BT(8));
     bool picked = focused && g_pall == id && !t.empty();
-    if (picked) rect(x - BT(1), y - BT(1), mt_w(F_MC, t) + BT(2), mt_h(F_MC) + BT(1), M_PICK);
-    mt(F_MC, x, y, picked ? M_WHITE : M_INK, t);
-    if (focused && !picked && (long)(plat_now() / 0.3) % 2 == 0) mt(F_MC, x + mt_w(F_MC, t), y, M_INK, "_");
+    if (picked) rect(tx - BT(1), ty - BT(1), mt_w(F_MC, t) + BT(2), mt_h(F_MC) + BT(1), M_PICK);
+    int cx = tx + p_stext(F_MC, tx, ty, picked ? M_WHITE : Col{224, 224, 224, 255}, t);
+    if (focused && !picked && (long)(plat_now() / 0.3) % 2 == 0) p_stext(F_MC, t.empty() ? tx : cx, ty, Col{224, 224, 224, 255}, "_");
     return enter;
 }
 
@@ -1130,6 +1164,7 @@ static void p_ask_close(bool yes)
 
 static bool prog_esc()
 {
+    if (g_focus == PI_PAST) { g_focus = PB_PAST; return true; }   // typing "past": back to the slider
     if (!g_pask.open) return false;
     p_ask_close(false);
     return true;
@@ -1312,9 +1347,11 @@ static void p_page_log(int x, int y, int w, int h)
     } else mt(F_MC, x, y, M_FAINT, whole.empty() ? "nothing logged this day" : "nothing matches the filter");
     y += BT(12);
     // the filter, a row of its own (button high, its words on the buttons' text line): all / runs (from Start) /
-    // practice, and "past" a run time or a spot, typed or on Minecraft's slider
+    // practice, then "past" on Minecraft's slider, which says what it shows ("show runs past 0:21"). Ctrl+click on it
+    // (or Enter on it with the keys) makes it Minecraft's text field: a time or a spot typed, Enter (the field stays,
+    // its text picked for the next one); Esc or a click elsewhere goes back to the slider.
     {
-        static const char *const kinds[3] = {"all", "runs", "practice"};
+        static const char *const kinds[3] = {"all", "runs", "practice"}, *const nouns[3] = {"attempts", "runs", "practice"};
         int fx = x, ty = y + BT(6);
         for (int i = 0; i < 3; i++) {
             int f = i == pg.filter ? F_MCB : F_MC;
@@ -1326,32 +1363,46 @@ static void p_page_log(int x, int y, int w, int h)
             fx += mt_w(f, kinds[i]) + BT(8);
         }
         fx += BT(4);
-        fx += mt(F_MC, fx, ty, M_DIM, "past") + BT(4);
-        // Enter: on (empty = off). The box keeps the keyboard with its text picked, so the next time typed replaces it.
-        if (p_input(PI_PAST, g_ppast, 15, fx, ty, BT(56), "0:30")) {
-            std::string t = p_clean(g_ppast);
-            float secs;
-            if (t.empty() || p_parse_clock(t, secs) || p_spot_named(t)) {
-                pg.past = g_ppast = t;
-                g_pscroll = 0;
-                g_pall = PI_PAST;
-                p_send("sm_progui past \"%s\"", t.c_str());
-            } else toast("past: a run time like 1:30, or a spot");
+        int sw = (x + w - fx) / BT(1), SW = BT(sw), SH = BT(20);
+        const int DRAG_PAST = 4200;   // (g_drag: the CS:TV window's sliders use small numbers)
+        bool editing = g_focus == PI_PAST;
+        if (editing && g_click && !hover(fx, y, SW, SH)) { editing = false; g_focus = 0; }   // (the click goes on)
+        if (!editing && g_drag != DRAG_PAST && ((ctrl_down() && take_click(fx, y, SW, SH)) || (g_focus == PB_PAST && in.enter))) {
+            in.enter = false;
+            g_ppast = pg.past;
+            p_focus(PI_PAST);   // its text picked: what's typed replaces it
+            editing = true;
         }
-        // the slider: start .. your end (the bars' scale); the list follows while it's dragged, the backend hears the
-        // time once it's let go; all the way left = off
-        fx += BT(62);
-        int sw = (x + w - fx) / BT(1);
-        if (sw >= 40) {
-            const int DRAG_PAST = 4200;   // (g_drag: the CS:TV window's sliders use small numbers)
+        if (editing) {
+            p_nav(PI_PAST, fx, y, SW, SH);
+            if (p_editbox(PI_PAST, g_ppast, 15, fx, y, sw, "a time like 1:30, or a spot")) {
+                std::string t = p_clean(g_ppast);
+                float secs;
+                if (t.empty() || p_parse_clock(t, secs) || p_spot_named(t)) {
+                    pg.past = g_ppast = t;
+                    g_pscroll = 0;
+                    g_pall = PI_PAST;
+                    p_send("sm_progui past \"%s\"", t.c_str());
+                } else toast("past: a run time like 1:30, or a spot");
+            }
+        } else {
+            // start .. your end (the bars' scale); the list follows while it's dragged, the backend hears the time once
+            // it's let go; all the way left = off
+            std::string label = pg.past.empty() ? std::string("show all ") + nouns[pg.filter]
+                                                : std::string("show ") + nouns[pg.filter] + " past " + p_point(pg.past);
             float scale = p_scale(), past = p_past_time(), t = past > 0 ? std::min(past, scale) / scale : 0;
             bool released;
-            if (p_slider(DRAG_PAST, fx, y, sw, t, pg.past.empty() ? "off" : p_point(pg.past), &released)) {
+            p_nav(PB_PAST, fx, y, SW, SH);
+            if (p_slider(DRAG_PAST, fx, y, sw, t, label, &released, g_focus == PB_PAST)) {
                 float secs = t * scale;
                 std::string v = secs < 0.5f ? "" : p_clock(secs);
                 if (v != pg.past) { pg.past = g_ppast = v; g_pscroll = 0; }
             }
             if (released) p_send("sm_progui past \"%s\"", pg.past.c_str());
+            if (g_drag != DRAG_PAST && (hover(fx, y, SW, SH) || g_focus == PB_PAST)) {
+                p_tip("ctrl+click to type a time or a spot", M_GRAY);
+                if (g_focus == PB_PAST && !hover(fx, y, SW, SH)) p_tip_at(fx + SW / 2, y + SH + BT(4));
+            }
         }
     }
     y += BT(24);

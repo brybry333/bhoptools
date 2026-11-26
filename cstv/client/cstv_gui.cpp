@@ -88,6 +88,7 @@ static int (*SDL_SetClipboardText_)(const char *);
 static void (*SDL_free_)(void *);
 static void (*SDL_StartTextInput_)();
 static int (*SDL_GetScancodeFromName_)(const char *);
+static int (*SDL_GetModState_)();
 
 static SdlFilter g_prev_filter;
 static void *g_prev_data;
@@ -125,8 +126,19 @@ static bool load_sdl()
     *(void **)&SDL_free_ = dlsym(h, "SDL_free");
     *(void **)&SDL_StartTextInput_ = dlsym(h, "SDL_StartTextInput");
     *(void **)&SDL_GetScancodeFromName_ = dlsym(h, "SDL_GetScancodeFromName");
+    *(void **)&SDL_GetModState_ = dlsym(h, "SDL_GetModState");
     dlclose(h);   // RTLD_NOLOAD only took a reference; the game keeps it loaded
     return SDL_GetEventFilter_ && SDL_SetEventFilter_;
+#endif
+}
+
+// Ctrl held right now (a click's own event doesn't say)
+static bool ctrl_down()
+{
+#ifdef _WIN32
+    return plat_ctrl_down();
+#else
+    return SDL_GetModState_ && (SDL_GetModState_() & KMOD_CTRL);
 #endif
 }
 
