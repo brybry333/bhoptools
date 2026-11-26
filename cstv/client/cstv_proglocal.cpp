@@ -174,6 +174,7 @@ struct Spot { std::string name; float lo, hi; };
 
 struct {
     bool autofinish = true, saveat_here = false;
+    bool zero_clock = false;   // run time 0 (Start, a typed 0) shows as "0:00" instead of "Start"
     int bin = 10, daystart = 5;
     bool loaded = false;
 } S;
@@ -267,6 +268,7 @@ void load_settings()
         if (sscanf(line.c_str(), "%31s %d", key, &v) != 2) continue;
         if (!strcmp(key, "autofinish")) S.autofinish = v != 0;
         else if (!strcmp(key, "saveat")) S.saveat_here = v != 0;
+        else if (!strcmp(key, "zero")) S.zero_clock = v != 0;
         else if (!strcmp(key, "bin")) S.bin = v < 5 ? 5 : v > 60 ? 60 : v;
         else if (!strcmp(key, "daystart")) S.daystart = v < 0 ? 0 : v > 23 ? 23 : v;
     }
@@ -275,7 +277,8 @@ void load_settings()
 void save_settings()
 {
     char b[160];
-    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nbin %d\ndaystart %d\n", S.autofinish, S.saveat_here, S.bin, S.daystart);
+    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nbin %d\ndaystart %d\n", S.autofinish, S.saveat_here, S.zero_clock, S.bin,
+             S.daystart);
     write_file(dir_path() + SEP + "settings.txt", b);
 }
 
@@ -410,13 +413,14 @@ void send_entry(const Entry &e)
 
 void send_cfg()
 {
-    apply({"prog_ui", "cfg", S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0", std::to_string(S.daystart), day_of(time(nullptr)), std::to_string(S.bin)});
+    apply({"prog_ui", "cfg", S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0", std::to_string(S.daystart), day_of(time(nullptr)), std::to_string(S.bin),
+           S.zero_clock ? "1" : "0"});
 }
 
 void sync_book()
 {
     apply({"prog_ui", "reset", M.map, day_of(time(nullptr)), std::to_string(S.daystart), S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0",
-           std::to_string(S.bin)});
+           std::to_string(S.bin), S.zero_clock ? "1" : "0"});
     for (const Entry &e : M.e) send_entry(e);
     for (const Spot &s : M.s) apply({"prog_ui", "s", s.name, num(s.lo), num(s.hi)});
     for (const auto &p : M.t) apply({"prog_ui", "t", p.first, std::to_string((long)p.second)});
@@ -439,9 +443,17 @@ bool parse_point(const std::string &input, std::string &text, float &time)
     return true;
 }
 
-// "0:22 (8%)", "Start", "End", "End slope"
+// run time 0: Start, or a typed 0 / 0:00
+bool zero_point(const std::string &text)
+{
+    float t;
+    return !strcasecmp(text.c_str(), "start") || (looks_like_time(text) && parse_clock(text, t) && t < 0.001f);
+}
+
+// "0:22 (8%)", "Start" (or "0:00", the setting), "End", "End slope"
 std::string point_label(const std::string &text, float time)
 {
+    if (zero_point(text)) return S.zero_clock ? "0:00" : "Start";
     float end = end_time(), t;
     if (end > 0 && time >= 0 && parse_clock(text, t)) {
         char b[64];
@@ -519,6 +531,29 @@ void set_spot(const std::string &input, float lo, float hi)
     apply({"prog_ui", "s", name, num(lo), num(hi)});
     if (hi >= 0) chat("Saved %s at %s-%s.", name.c_str(), clock_text(lo).c_str(), clock_text(hi).c_str());
     else chat("Saved %s at %s.", name.c_str(), clock_text(lo).c_str());
+}
+
+// a spot's new name (the book's spot form): the log's attempts at it get it too. Start and End aren't renamed.
+void rename_spot(const std::string &old_in, const std::string &new_in)
+{
+    std::string to = sanitize(new_in).substr(0, MAX_TEXT - 1);
+    Spot *s = find_spot(sanitize(old_in));
+    if (!s || to.empty() || s->name == to || !strcasecmp(to.c_str(), "start") || !strcasecmp(to.c_str(), "end")
+        || !strcasecmp(s->name.c_str(), "end"))
+        return;
+    std::string was = s->name;
+    Spot *taken = find_spot(to);
+    if (taken && taken != s) M.s.erase(M.s.begin() + (s - M.s.data()));   // that spot stays (the spot line after this sets it)
+    else s->name = to;
+    for (Entry &e : M.e) {
+        bool ch = false;
+        if (!strcasecmp(e.from.c_str(), was.c_str())) { e.from = to; ch = true; }
+        if (!strcasecmp(e.to.c_str(), was.c_str())) { e.to = to; ch = true; }
+        if (ch) send_entry(e);
+    }
+    save_map();
+    apply({"prog_ui", "sd", was});
+    if (Spot *n = find_spot(to)) apply({"prog_ui", "s", n->name, num(n->lo), num(n->hi)});
 }
 
 void delete_spot(const std::string &input)
@@ -963,6 +998,12 @@ struct {
     double last_at = 0, sample_at = 0, live_at = 0;
     std::vector<Sample> trace, best;   // this run's path; the longest one this map had
     std::string lost;             // why the last teleport started no attempt
+    // the last attempt that got back to a start zone (a fail teleport, a restart, a death, or walked back after a
+    // while): !progsave in the start zone saves it, to its time just before. A finished run clears it.
+    bool ended = false;
+    std::string ended_from;
+    float ended_ft = -1, ended_tt = -1;
+    int ended_track = 0, ended_entry = 0;
 } R;
 
 bool g_viewing;
@@ -1027,18 +1068,11 @@ float attempt_end(double now)
     return run_time(now);
 }
 
-void progsave()
+// !progsave's entry for an attempt: a new one, or the one it saved before (entry) changed to the new end
+void save_attempt(int &entry, const std::string &from, float ft, float tt, int track)
 {
-    double now = plat_now();
-    if (!R.att || R.state != R_RUN) {
-        if (!have_zones()) chat("This map's timer zones aren't known (the server doesn't send them and the public zone list hasn't got this map), so runs can't be followed here. Type them: \x04!prog 2:24 to 4:02\x01.");
-        else if (!R.lost.empty()) chat("%s", R.lost.c_str());
-        else chat("Start a run or load a checkpoint first.");
-        return;
-    }
-    float tt = attempt_end(now);
     std::string to = clock_text(tt);
-    Entry *e = R.att_entry ? find_entry(R.att_entry) : nullptr;
+    Entry *e = entry ? find_entry(entry) : nullptr;
     if (e) {
         e->to = to;
         e->tt = tt;
@@ -1046,10 +1080,26 @@ void progsave()
         save_map();
         send_entry(*e);
     } else {
-        R.att_entry = insert_entry(R.from, R.ft, to, tt, 1, R.track);
-        if (!R.att_entry) return;
+        entry = insert_entry(from, ft, to, tt, 1, track);
+        if (!entry) return;
     }
-    print_saved(R.from, R.ft, to, tt);
+    print_saved(from, ft, to, tt);
+}
+
+void progsave()
+{
+    double now = plat_now();
+    if (R.state == R_IN_START && R.ended) {   // sent back to the start (one-shot maps): the attempt that just ended
+        save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
+        return;
+    }
+    if (!R.att || R.state != R_RUN) {
+        if (!have_zones()) chat("This map's timer zones aren't known (the server doesn't send them and the public zone list hasn't got this map), so runs can't be followed here. Type them: \x04!prog 2:24 to 4:02\x01.");
+        else if (!R.lost.empty()) chat("%s", R.lost.c_str());
+        else chat("Start a run or load a checkpoint first.");
+        return;
+    }
+    save_attempt(R.att_entry, R.from, R.ft, attempt_end(now), R.track);
 }
 
 void finish(double now)
@@ -1058,6 +1108,7 @@ void finish(double now)
     // (an attempt that began this moment was a teleport into the end zone, like shavit's !end: not a run)
     if (R.att && S.autofinish && now - R.att_at >= 0.1 && insert_entry(R.from, R.ft, "End", t, 2, R.track) > 0) print_saved(R.from, R.ft, "End", t);
     R.att = false;
+    R.ended = false;
     R.state = R_DONE;
     keep_trace();
 }
@@ -1085,6 +1136,16 @@ void tick()
     }
     int start = zone_at(me.pos, me.ducked, 0);
     if (start >= 0) {
+        // back in a start zone mid-attempt: sent here (teleport, restart, respawn after a death: no position last
+        // tick) or walked back after 2 s (stepping out and back in to prestrafe doesn't count)
+        if (R.state == R_RUN && R.att && R.last_time >= 0 && (tele || !R.have || R.last_time - R.ft >= 2.0f)) {
+            R.ended = true;
+            R.ended_from = R.from;
+            R.ended_ft = R.ft;
+            R.ended_tt = R.last_time;   // its time just before
+            R.ended_track = R.track;
+            R.ended_entry = R.att_entry;
+        }
         if (R.state == R_RUN) keep_trace();
         R.state = R_IN_START;
         R.track = start;
@@ -1199,6 +1260,7 @@ void pl_level_init()
     load_dests(level ? level : "");
     R.state = R_NONE;
     R.att = false;
+    R.ended = false;
     R.have = false;
     R.trace.clear();
     R.best.clear();
@@ -1270,6 +1332,7 @@ void pl_command(const char *line)
         M.e.erase(std::remove_if(M.e.begin(), M.e.end(), [id](const Entry &e) { return e.id == id; }), M.e.end());
         if (M.e.size() != n) save_map();
         if (R.att_entry == id) R.att_entry = 0;
+        if (R.ended_entry == id) R.ended_entry = 0;
         apply({"prog_ui", "d", std::to_string(id)});
     } else if (verb == "spot") {   // spot "<name>" "<from>" ["<to>"]  (or "<from>-<to>" in one)
         float lo, hi = -1;
@@ -1278,10 +1341,12 @@ void pl_command(const char *line)
         if (ok) set_spot(a, lo, hi);
         else apply({"prog_ui", "msg", "times like 3:40 and 3:55"});
     } else if (verb == "spotdel") delete_spot(a);
+    else if (verb == "spotrename") rename_spot(a, b);
     else if (verb == "set") {
         int n = atoi(b.c_str());
         if (a == "autofinish") S.autofinish = n != 0;
         else if (a == "saveat") S.saveat_here = n != 0;
+        else if (a == "zero") S.zero_clock = n != 0;
         else if (a == "bin") S.bin = n < 5 ? 5 : n > 60 ? 60 : n;
         save_settings();
         send_cfg();

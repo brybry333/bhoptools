@@ -18,12 +18,13 @@
 // Everything is run time (seconds). "End" is a spot like the others but one time: your estimated finish, the
 // 100 % that percentages show against. The other spots are a range (where you get to a place, varying).
 //
-// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin>
+// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero>
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
-//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin>
+//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero>
 //                   prog_ui done | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
-//                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | set autofinish|saveat|bin <n>
+//                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | spotrename "<old>" "<new>"
+//                   set autofinish|saveat|zero|bin <n>      (zero 1: run time 0 shows as 0:00, 0: as start)
 // Included into cstv_gui.cpp (its fonts, input and primitives).
 #include <functional>
 #ifndef _WIN32
@@ -37,6 +38,7 @@ static struct {
     std::string map, today;
     int daystart = 5, bin = 10;   // bin: seconds of a fail range (stats, graph), the player's setting
     bool autofinish = true, saveat_here = false, synced = false, have = false;
+    bool zero_clock = false;      // run time 0 (Start, a typed 0) shows as 0:00 instead of start
     std::vector<PEntry> e;        // by id
     std::vector<PSpot> spots;     // by where they start; "End" among them
     float end = -1;               // the spot "End": your estimated finish
@@ -65,7 +67,7 @@ static std::vector<std::string> g_pdays;         // days with entries, oldest fi
 enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2 };
 enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
        PB_A_NEXT, PB_B_PREV, PB_B_NEXT, PB_SPOT_ADD = 1030, PB_SPOT_CANCEL, PB_SPOT_DEL, PB_END2 = 1040, PB_AUTO_YES, PB_AUTO_NO,
-       PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
+       PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
 enum { PR_ENTRY = 100000, PR_SPOT = 200000 };
 static const int P_BINS[] = {5, 10, 15, 20, 30};
 
@@ -159,8 +161,22 @@ static std::string p_hhmm(long ts)
 }
 
 static std::string p_lower(std::string s) { for (char &c : s) c = (char)tolower((unsigned char)c); return s; }
+// run time 0 (Start, a typed 0 or 0:00) the way the settings show it; anything else as it is
+static std::string p_shown(const std::string &s)
+{
+    bool zero = !strcasecmp(s.c_str(), "start"), digit = false;
+    if (!zero) {
+        for (char c : s) { if (c == '0') digit = true; else if (c != ':' && c != '.') { digit = false; break; } }
+        zero = digit;
+    }
+    return zero ? (pg.zero_clock ? "0:00" : "Start") : s;
+}
 // how a point reads: times as they are, names in lower case
-static std::string p_point(const std::string &s) { return s.empty() || (s[0] >= '0' && s[0] <= '9') ? s : p_lower(s); }
+static std::string p_point(const std::string &s0)
+{
+    std::string s = p_shown(s0);
+    return s.empty() || (s[0] >= '0' && s[0] <= '9') ? s : p_lower(s);
+}
 static std::string p_entry_text(const PEntry &e) { return p_point(e.from) + " \xE2\x80\x93 " + p_point(e.to); }
 
 static bool p_is_end(const PSpot &s) { return !strcasecmp(s.name.c_str(), "End"); }
@@ -205,7 +221,7 @@ static void p_pick(int id)
 {
     const PEntry *e = p_entry(id);
     g_psel = e ? id : 0;
-    if (e) { g_pe_from = e->from; g_pe_to = e->to; }
+    if (e) { g_pe_from = p_shown(e->from); g_pe_to = p_shown(e->to); }
     g_focus = 0;
 }
 
@@ -341,6 +357,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
     if (v == "reset" && argc >= 7) {
         pg.map = A(2); pg.today = A(3); pg.daystart = I(4); pg.autofinish = I(5) != 0; pg.saveat_here = I(6) != 0;
         if (argc >= 8 && I(7) >= 5) pg.bin = I(7);
+        if (argc >= 9) pg.zero_clock = I(8) != 0;
         pg.e.clear(); pg.spots.clear(); pg.end = -1; pg.practised.clear();
         pg.synced = false; pg.have = true; pg.version++;
         g_psel = 0; g_pday.clear(); g_pg_a = g_pg_b = -1;
@@ -349,7 +366,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
         auto it = std::lower_bound(pg.e.begin(), pg.e.end(), n.id, [](const PEntry &a, int id) { return a.id < id; });
         if (it != pg.e.end() && it->id == n.id) *it = n;
         else pg.e.insert(it, n);
-        if (g_psel == n.id) { g_pe_from = n.from; g_pe_to = n.to; }
+        if (g_psel == n.id) { g_pe_from = p_shown(n.from); g_pe_to = p_shown(n.to); }
         pg.version++;
     } else if (v == "t" && argc >= 4) {
         std::string d = A(2);
@@ -375,6 +392,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
     } else if (v == "cfg" && argc >= 6) {
         pg.autofinish = I(2) != 0; pg.saveat_here = I(3) != 0; pg.daystart = I(4); pg.today = A(5);
         if (argc >= 7 && I(6) >= 5 && I(6) != pg.bin) { pg.bin = I(6); pg.version++; }
+        if (argc >= 8 && (I(7) != 0) != pg.zero_clock) { pg.zero_clock = I(7) != 0; pg.version++; }
     } else if (v == "done") pg.synced = true;
     else if (v == "msg" && argc >= 3) toast(A(2));
     else if (v == "attempt" && argc >= 7) {
@@ -1118,8 +1136,8 @@ static void p_entry_form(int x, int y, int w)
         if (p_button(PB_CANCEL, cx, y, 42, "Cancel")) { g_psel = 0; g_focus = 0; return; }
         if (go) {
             int id = e->id;   // (p_send changes pg.e: e isn't used after it)
-            std::string f = p_clean(g_pe_from), t = p_clean(g_pe_to), was_to = e->to;
-            if (!f.empty() && f != e->from) p_send("sm_progui edit %d from \"%s\"", id, f.c_str());
+            std::string f = p_clean(g_pe_from), t = p_clean(g_pe_to), was_to = p_shown(e->to);
+            if (!f.empty() && f != p_shown(e->from)) p_send("sm_progui edit %d from \"%s\"", id, f.c_str());
             if (!t.empty() && t != was_to) p_send("sm_progui edit %d to \"%s\"", id, t.c_str());
             g_focus = PR_ENTRY + id;   // back to its row
             g_psel = 0;
@@ -1602,7 +1620,10 @@ static void p_page_spots(int x, int y, int w, int h)
     if (go) {
         std::string n = p_clean(g_pspot_name), lo = p_clean(g_pspot_lo), hi = p_clean(g_pspot_hi);
         if (!n.empty() && !lo.empty()) {
-            if (editing && strcasecmp(n.c_str(), g_pspot_edit.c_str())) p_send("sm_progui spotdel \"%s\"", p_clean(g_pspot_edit).c_str());
+            if (editing && strcmp(n.c_str(), g_pspot_edit.c_str())) {   // renamed: the log's attempts at it follow
+                if (!strcasecmp(n.c_str(), "start") || !strcasecmp(n.c_str(), "end")) p_send("sm_progui spotdel \"%s\"", p_clean(g_pspot_edit).c_str());
+                else p_send("sm_progui spotrename \"%s\" \"%s\"", p_clean(g_pspot_edit).c_str(), n.c_str());
+            }
             p_send("sm_progui spot \"%s\" \"%s\" \"%s\"", n.c_str(), lo.c_str(), hi.c_str());
             g_pspot_edit.clear(); g_pspot_name.clear(); g_pspot_lo.clear(); g_pspot_hi.clear();
             p_focus(PI_SPOT_NAME);
@@ -1673,6 +1694,10 @@ static void p_page_settings(int x, int y, int w, int h)
     mt(F_MC, lx, y + ty, M_DIM, "progsave ends at");
     if (p_button(PB_SAVEAT_FAIL, cx, y, 70, "last fail", true, pg.saveat_here ? 0 : 1) && pg.saveat_here) { pg.saveat_here = false; p_send("sm_progui set saveat 0"); }
     if (p_button(PB_SAVEAT_HERE, cx + BT(72), y, 70, "where I am", true, pg.saveat_here ? 1 : 0) && !pg.saveat_here) { pg.saveat_here = true; p_send("sm_progui set saveat 1"); }
+    y += rh;
+    mt(F_MC, lx, y + ty, M_DIM, "0:00 shows as");
+    if (p_button(PB_ZERO_START, cx, y, 40, "start", true, pg.zero_clock ? 0 : 1) && pg.zero_clock) { pg.zero_clock = false; pg.version++; p_send("sm_progui set zero 0"); }
+    if (p_button(PB_ZERO_CLOCK, cx + BT(42), y, 40, "0:00", true, pg.zero_clock ? 1 : 0) && !pg.zero_clock) { pg.zero_clock = true; pg.version++; p_send("sm_progui set zero 1"); }
     y += rh;
     mt(F_MC, lx, y + ty, M_DIM, "fail range");
     for (int i = 0; i < 5; i++) {
