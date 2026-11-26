@@ -1163,15 +1163,17 @@ void tick()
     }
     int start = zone_at(me.pos, me.ducked, 0);
     if (start >= 0) {
-        // back in a start zone mid-attempt: sent here (teleport, restart, respawn after a death: no position last
-        // tick) or walked back after 2 s (stepping out and back in to prestrafe doesn't count)
-        if (R.state == R_RUN && R.att && R.last_time >= 0 && (tele || !R.have || R.last_time - R.ft >= 2.0f)) {
+        // back in a start zone mid-attempt. It's the attempt !progsave saves when it failed: the map sent you here
+        // (a one-shot map's fail teleport), or it fell or died just before (then a restart, a respawn); or when it
+        // got 2 s into the map (by where you got, not the clock). Restarting or walking back in from fiddling around
+        // the start (prestrafing, standing there) keeps the attempt before.
+        bool failed = R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW;
+        float got = R.state == R_RUN && R.att && R.last_time >= 0 ? reached(R.last_time) : -1;
+        if (got >= 0 && ((tele && near_dest(me.pos)) || failed || got - R.ft >= 2.0f)) {
             R.ended = true;
             R.ended_from = R.from;
             R.ended_ft = R.ft;
-            // where it ended: a fail it had just before (a restart after falling), else how far it got (not time spent
-            // standing there)
-            R.ended_tt = R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW ? R.fail_time : reached(R.last_time);
+            R.ended_tt = failed ? R.fail_time : got;   // the fail, else how far it got (not time spent standing)
             R.ended_at = now;
             R.ended_track = R.track;
             R.ended_entry = R.att_entry;
