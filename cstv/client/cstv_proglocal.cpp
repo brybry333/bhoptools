@@ -1068,11 +1068,28 @@ bool have_zones()
     return !g_zones.empty();
 }
 
+// How far the run got, for an end at run time `clock`: the time it first reached the place it's at, so standing there
+// (before a restart, a fail, a save) doesn't count as getting further. This run's path backwards from its end while
+// it stays within a player's width of the last point; under half a second of that (still moving) keeps the clock.
+float reached(float clock)
+{
+    if (R.trace.empty()) return clock;
+    const Sample &end = R.trace.back();
+    float t = end.t;
+    for (size_t i = R.trace.size(); i-- > 0;) {
+        const Sample &s = R.trace[i];
+        float dx = s.p[0] - end.p[0], dy = s.p[1] - end.p[1], dz = s.p[2] - end.p[2];
+        if (dx * dx + dy * dy > 48 * 48 || fabsf(dz) > 80) break;
+        t = s.t;
+    }
+    return clock - t >= 0.5f && t >= 0 ? t : clock;
+}
+
 // where the attempt ended: the last fail if it was recent, else where you are
 float attempt_end(double now)
 {
     if (!S.saveat_here && R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW) return R.fail_time;
-    return run_time(now);
+    return reached(run_time(now));
 }
 
 // !progsave's entry for an attempt: a new one, or the one it saved before (entry) changed to the new end
@@ -1130,7 +1147,7 @@ void tick()
     if (!read_me(me)) return;
     double now = plat_now();
     if (!me.alive) {
-        if (R.alive && R.state == R_RUN && R.att) { R.fail_time = run_time(now); R.fail_at = now; }
+        if (R.alive && R.state == R_RUN && R.att) { R.fail_time = reached(run_time(now)); R.fail_at = now; }
         R.alive = false;
         R.have = false;
         return;
@@ -1152,7 +1169,9 @@ void tick()
             R.ended = true;
             R.ended_from = R.from;
             R.ended_ft = R.ft;
-            R.ended_tt = R.last_time;   // its time just before
+            // where it ended: a fail it had just before (a restart after falling), else how far it got (not time spent
+            // standing there)
+            R.ended_tt = R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW ? R.fail_time : reached(R.last_time);
             R.ended_at = now;
             R.ended_track = R.track;
             R.ended_entry = R.att_entry;
@@ -1169,7 +1188,7 @@ void tick()
         begin_attempt("Start", 0, now);
     } else if (tele && (R.state == R_RUN || R.state == R_DONE || R.state == R_IN_START)) {
         if (near_dest(me.pos)) {   // the map sent you back: a fail (the attempt goes on, as shavit's timer does)
-            if (R.state == R_RUN && R.att) { R.fail_time = R.last_time; R.fail_at = now; }
+            if (R.state == R_RUN && R.att) { R.fail_time = reached(R.last_time); R.fail_at = now; }
         } else {                   // a checkpoint loaded: an attempt from your time there
             float t = time_at(me.pos);
             if (t >= 0) {
