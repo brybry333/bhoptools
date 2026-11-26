@@ -48,6 +48,7 @@
 
 #include "cstv_gui.h"
 #include "cstv_platform.h"
+#include "../../client/shared/bsp_lzma.h"   // bhoptools' LZMA decoder for compressed BSP lumps
 
 #ifdef _WIN32
 static const char SEP = '\\';
@@ -891,7 +892,11 @@ void load_dests(const std::string &level)
         }
     }
     fclose(f);
-    if (ents.compare(0, 4, "LZMA") == 0) return;   // (compressed lump: not in CS:S maps)
+    if (ents.compare(0, 4, "LZMA") == 0) {   // a compressed lump (bhop_lust, bhop_saturn, ...): bhoptools' decoder
+        std::vector<uint8_t> raw;
+        if (!bsplzma::DecodeLump((const uint8_t *)ents.data(), ents.size(), raw)) return;
+        ents.assign((const char *)raw.data(), raw.size());
+    }
     struct Ent { std::string cls, name, target; Vec3 o; bool has_o; };
     std::vector<Ent> list;
     size_t p = 0;
@@ -999,10 +1004,12 @@ struct {
     std::vector<Sample> trace, best;   // this run's path; the longest one this map had
     std::string lost;             // why the last teleport started no attempt
     // the last attempt that got back to a start zone (a fail teleport, a restart, a death, or walked back after a
-    // while): !progsave in the start zone saves it, to its time just before. A finished run clears it.
+    // while): !progsave saves it, to its time just before, while in the start zone or for FAIL_WINDOW after (one-shot
+    // maps: you're off again by then) unless the new attempt failed itself. A finished run clears it.
     bool ended = false;
     std::string ended_from;
     float ended_ft = -1, ended_tt = -1;
+    double ended_at = 0;
     int ended_track = 0, ended_entry = 0;
 } R;
 
@@ -1089,11 +1096,14 @@ void save_attempt(int &entry, const std::string &from, float ft, float tt, int t
 void progsave()
 {
     double now = plat_now();
-    if (R.state == R_IN_START && R.ended) {   // sent back to the start (one-shot maps): the attempt that just ended
+    bool running = R.att && R.state == R_RUN;
+    // sent back to the start (one-shot maps, a restart): the attempt that ended there, from the start zone or soon
+    // after (as "last fail" saves a recent fail), unless the attempt since has a fail of its own or "where I am" is on
+    if (R.ended && (R.state == R_IN_START || (!S.saveat_here && now - R.ended_at < FAIL_WINDOW && !(running && R.fail_at > R.att_at)))) {
         save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
         return;
     }
-    if (!R.att || R.state != R_RUN) {
+    if (!running) {
         if (!have_zones()) chat("This map's timer zones aren't known (the server doesn't send them and the public zone list hasn't got this map), so runs can't be followed here. Type them: \x04!prog 2:24 to 4:02\x01.");
         else if (!R.lost.empty()) chat("%s", R.lost.c_str());
         else chat("Start a run or load a checkpoint first.");
@@ -1143,6 +1153,7 @@ void tick()
             R.ended_from = R.from;
             R.ended_ft = R.ft;
             R.ended_tt = R.last_time;   // its time just before
+            R.ended_at = now;
             R.ended_track = R.track;
             R.ended_entry = R.att_entry;
         }
