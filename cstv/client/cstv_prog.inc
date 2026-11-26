@@ -1286,15 +1286,41 @@ static void p_page_log(int x, int y, int w, int h)
         }
         fx += BT(4);
         fx += mt(F_MC, fx, y, M_DIM, "past") + BT(4);
-        if (p_input(PI_PAST, g_ppast, 15, fx, y, BT(56), "0:30")) {   // Enter: on (empty = off)
+        // Enter: on (empty = off). The box keeps the keyboard with its text picked, so the next time typed replaces it.
+        if (p_input(PI_PAST, g_ppast, 15, fx, y, BT(56), "0:30")) {
             std::string t = p_clean(g_ppast);
             float secs;
             if (t.empty() || p_parse_clock(t, secs) || p_spot_named(t)) {
                 pg.past = g_ppast = t;
                 g_pscroll = 0;
-                g_focus = 0;
+                g_pall = PI_PAST;
                 p_send("sm_progui past \"%s\"", t.c_str());
             } else toast("past: a run time like 1:30, or a spot");
+        }
+        // and a slider for it: start .. your end (the bars' scale), the list follows while it's dragged, the backend
+        // hears the time once it's let go; all the way left = off
+        fx += BT(64);
+        int sw = x + w - fx, cy = y + mt_h(F_MC) / 2;
+        if (sw >= BT(30)) {
+            const int DRAG_PAST = 4200;   // (g_drag: the CS:TV window's sliders use small numbers)
+            float scale = p_scale(), past = p_past_time();
+            if (take_click(fx - BT(3), y - BT(3), sw + BT(6), mt_h(F_MC) + BT(6))) g_drag = DRAG_PAST;
+            bool drag = g_drag == DRAG_PAST;
+            if (drag) {
+                float t = (float)(g_mx - fx) / sw * scale;
+                std::string v = t < 0.5f ? "" : p_clock(std::min(t, scale));
+                if (v != pg.past) { pg.past = g_ppast = v; g_pscroll = 0; }
+                past = p_past_time();
+                if (!in.down) {
+                    g_drag = 0;
+                    p_send("sm_progui past \"%s\"", pg.past.c_str());
+                }
+            }
+            bool hv = drag || hover(fx - BT(3), y - BT(3), sw + BT(6), mt_h(F_MC) + BT(6));
+            int hx = past > 0 ? (int)(std::min(past, scale) / scale * sw) : 0;
+            rect(fx, cy, sw, BT(1), M_FAINT);
+            if (hx > 0) rect(fx, cy, hx, BT(1), M_INK);
+            rect(fx + hx - BT(1), cy - BT(4), BT(3), BT(9), hv ? M_BLUE : M_INK);
         }
     }
     y += BT(14);
