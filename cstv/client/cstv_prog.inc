@@ -1695,7 +1695,7 @@ static void p_page_settings(int x, int y, int w, int h)
     if (p_button(PB_AUTO_YES, cx, y, 40, "Yes", true, pg.autofinish ? 1 : 0) && !pg.autofinish) { pg.autofinish = true; p_send("sm_progui set autofinish 1"); }
     if (p_button(PB_AUTO_NO, cx + BT(42), y, 40, "No", true, pg.autofinish ? 0 : 1) && pg.autofinish) { pg.autofinish = false; p_send("sm_progui set autofinish 0"); }
     y += rh;
-    mt(F_MC, lx, y + ty, M_DIM, "auto progsave");   // each time an attempt gets back to the start zone
+    mt(F_MC, lx, y + ty, M_DIM, "Auto save");   // progsave on its own each time an attempt gets back to the start zone
     if (p_button(PB_AUTOSAVE_YES, cx, y, 40, "Yes", true, pg.autosave ? 1 : 0) && !pg.autosave) { pg.autosave = true; p_send("sm_progui set autosave 1"); }
     if (p_button(PB_AUTOSAVE_NO, cx + BT(42), y, 40, "No", true, pg.autosave ? 0 : 1) && pg.autosave) { pg.autosave = false; p_send("sm_progui set autosave 0"); }
     y += rh;

@@ -1166,7 +1166,7 @@ void tick()
         R.track = start;
         R.att = false;
         R.lost.clear();
-        if (just_ended && S.autosave)   // "auto progsave": what !progsave in the start zone does, on its own
+        if (just_ended && S.autosave)   // "Auto save": what !progsave in the start zone does, on its own
             save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
     } else if (R.state == R_IN_START && !tele) {   // left the start zone: the run starts
         R.state = R_RUN;
