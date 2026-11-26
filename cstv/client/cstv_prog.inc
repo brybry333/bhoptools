@@ -25,7 +25,7 @@
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | spotrename "<old>" "<new>"
 //                   set autofinish|saveat|zero|autosave|filter|chatsound|bin <n>   (zero 1: run time 0 shows as 0:00, 0: as start;
-//                   autosave 1: progsave on its own each time an attempt gets back to a start zone;
+//                   autosave 1: progsave on its own each time a run from Start gets back to a start zone;
 //                   filter: page 1 shows 0 all, 1 runs from Start, 2 practice) | past "<time or spot>"
 //                   (page 1 shows only attempts that got that far; "" = all)
 // Included into cstv_gui.cpp (its fonts, input and primitives).
@@ -42,7 +42,7 @@ static struct {
     int daystart = 5, bin = 10;   // bin: seconds of a fail range (stats, graph), the player's setting
     bool autofinish = true, saveat_here = false, synced = false, have = false;
     bool zero_clock = false;      // run time 0 (Start, a typed 0) shows as 0:00 instead of start
-    bool autosave = false;        // progsave on its own each time an attempt gets back to a start zone
+    bool autosave = false;        // progsave on its own each time a run from Start gets back to a start zone
     int filter = 0;               // page 1 shows: 0 all, 1 runs (from Start), 2 practice
     std::string past;             // and only attempts that got this far: a run time or a spot ("" = all)
     bool chat_sound = true;       // the [Prog] chat lines play the chat sound

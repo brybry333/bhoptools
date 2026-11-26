@@ -178,7 +178,7 @@ struct Spot { std::string name; float lo, hi; };
 struct {
     bool autofinish = true, saveat_here = false;
     bool zero_clock = false;   // run time 0 (Start, a typed 0) shows as "0:00" instead of "Start"
-    bool autosave = false;     // !progsave on its own each time an attempt gets back to a start zone
+    bool autosave = false;     // !progsave on its own each time a run from Start gets back to a start zone
     int filter = 0;            // which attempts the log page shows: 0 all, 1 runs (from Start), 2 practice
     std::string past;          // and only those that got this far: a run time or a spot's name ("" = all)
     bool chat_sound = true;    // the [Prog] chat lines play the chat sound (off: printed without it)
@@ -1187,7 +1187,9 @@ void tick()
         R.track = start;
         R.att = false;
         R.lost.clear();
-        if (just_ended && S.autosave)   // "Auto save": what !progsave in the start zone does, on its own
+        // "Auto save": what !progsave in the start zone does, on its own, for runs from the start zone only (practice
+        // from a checkpoint is never saved by it; !progsave still saves it)
+        if (just_ended && S.autosave && R.ended_from == "Start")
             save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
     } else if (R.state == R_IN_START && !tele) {   // left the start zone: the run starts
         R.state = R_RUN;
