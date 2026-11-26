@@ -176,6 +176,7 @@ struct Spot { std::string name; float lo, hi; };
 struct {
     bool autofinish = true, saveat_here = false;
     bool zero_clock = false;   // run time 0 (Start, a typed 0) shows as "0:00" instead of "Start"
+    bool autosave = false;     // !progsave on its own each time an attempt gets back to a start zone
     int bin = 10, daystart = 5;
     bool loaded = false;
 } S;
@@ -270,6 +271,7 @@ void load_settings()
         if (!strcmp(key, "autofinish")) S.autofinish = v != 0;
         else if (!strcmp(key, "saveat")) S.saveat_here = v != 0;
         else if (!strcmp(key, "zero")) S.zero_clock = v != 0;
+        else if (!strcmp(key, "autosave")) S.autosave = v != 0;
         else if (!strcmp(key, "bin")) S.bin = v < 5 ? 5 : v > 60 ? 60 : v;
         else if (!strcmp(key, "daystart")) S.daystart = v < 0 ? 0 : v > 23 ? 23 : v;
     }
@@ -278,8 +280,8 @@ void load_settings()
 void save_settings()
 {
     char b[160];
-    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nbin %d\ndaystart %d\n", S.autofinish, S.saveat_here, S.zero_clock, S.bin,
-             S.daystart);
+    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nautosave %d\nbin %d\ndaystart %d\n", S.autofinish, S.saveat_here,
+             S.zero_clock, S.autosave, S.bin, S.daystart);
     write_file(dir_path() + SEP + "settings.txt", b);
 }
 
@@ -415,13 +417,13 @@ void send_entry(const Entry &e)
 void send_cfg()
 {
     apply({"prog_ui", "cfg", S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0", std::to_string(S.daystart), day_of(time(nullptr)), std::to_string(S.bin),
-           S.zero_clock ? "1" : "0"});
+           S.zero_clock ? "1" : "0", S.autosave ? "1" : "0"});
 }
 
 void sync_book()
 {
     apply({"prog_ui", "reset", M.map, day_of(time(nullptr)), std::to_string(S.daystart), S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0",
-           std::to_string(S.bin), S.zero_clock ? "1" : "0"});
+           std::to_string(S.bin), S.zero_clock ? "1" : "0", S.autosave ? "1" : "0"});
     for (const Entry &e : M.e) send_entry(e);
     for (const Spot &s : M.s) apply({"prog_ui", "s", s.name, num(s.lo), num(s.hi)});
     for (const auto &p : M.t) apply({"prog_ui", "t", p.first, std::to_string((long)p.second)});
@@ -1149,7 +1151,8 @@ void tick()
         // back in a start zone mid-attempt (a restart, a one-shot map's fail teleport, a respawn, walking back): the
         // attempt ends here, at its run time just before ("last fail": a fail it had in the last 20 s, as a restart
         // after falling somewhere else). !progsave in the start zone saves it.
-        if (R.state == R_RUN && R.att && R.last_time >= 0) {
+        bool just_ended = R.state == R_RUN && R.att && R.last_time >= 0;
+        if (just_ended) {
             bool failed = !S.saveat_here && R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW;
             R.ended = true;
             R.ended_from = R.from;
@@ -1163,6 +1166,8 @@ void tick()
         R.track = start;
         R.att = false;
         R.lost.clear();
+        if (just_ended && S.autosave)   // "auto progsave": what !progsave in the start zone does, on its own
+            save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
     } else if (R.state == R_IN_START && !tele) {   // left the start zone: the run starts
         R.state = R_RUN;
         R.t0 = now;
@@ -1362,6 +1367,7 @@ void pl_command(const char *line)
         if (a == "autofinish") S.autofinish = n != 0;
         else if (a == "saveat") S.saveat_here = n != 0;
         else if (a == "zero") S.zero_clock = n != 0;
+        else if (a == "autosave") S.autosave = n != 0;
         else if (a == "bin") S.bin = n < 5 ? 5 : n > 60 ? 60 : n;
         save_settings();
         send_cfg();

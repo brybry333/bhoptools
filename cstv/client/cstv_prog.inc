@@ -18,13 +18,14 @@
 // Everything is run time (seconds). "End" is a spot like the others but one time: your estimated finish, the
 // 100 % that percentages show against. The other spots are a range (where you get to a place, varying).
 //
-// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero>
+// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero> <autosave>
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
-//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero>
+//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero> <autosave>
 //                   prog_ui done | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | spotrename "<old>" "<new>"
-//                   set autofinish|saveat|zero|bin <n>      (zero 1: run time 0 shows as 0:00, 0: as start)
+//                   set autofinish|saveat|zero|autosave|bin <n>   (zero 1: run time 0 shows as 0:00, 0: as start;
+//                   autosave 1: progsave on its own each time an attempt gets back to a start zone)
 // Included into cstv_gui.cpp (its fonts, input and primitives).
 #include <functional>
 #ifndef _WIN32
@@ -39,6 +40,7 @@ static struct {
     int daystart = 5, bin = 10;   // bin: seconds of a fail range (stats, graph), the player's setting
     bool autofinish = true, saveat_here = false, synced = false, have = false;
     bool zero_clock = false;      // run time 0 (Start, a typed 0) shows as 0:00 instead of start
+    bool autosave = false;        // progsave on its own each time an attempt gets back to a start zone
     std::vector<PEntry> e;        // by id
     std::vector<PSpot> spots;     // by where they start; "End" among them
     float end = -1;               // the spot "End": your estimated finish
@@ -67,7 +69,7 @@ static std::vector<std::string> g_pdays;         // days with entries, oldest fi
 enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2 };
 enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
        PB_A_NEXT, PB_B_PREV, PB_B_NEXT, PB_SPOT_ADD = 1030, PB_SPOT_CANCEL, PB_SPOT_DEL, PB_END2 = 1040, PB_AUTO_YES, PB_AUTO_NO,
-       PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
+       PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_AUTOSAVE_YES, PB_AUTOSAVE_NO, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
 enum { PR_ENTRY = 100000, PR_SPOT = 200000 };
 static const int P_BINS[] = {5, 10, 15, 20, 30};
 
@@ -358,6 +360,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
         pg.map = A(2); pg.today = A(3); pg.daystart = I(4); pg.autofinish = I(5) != 0; pg.saveat_here = I(6) != 0;
         if (argc >= 8 && I(7) >= 5) pg.bin = I(7);
         if (argc >= 9) pg.zero_clock = I(8) != 0;
+        if (argc >= 10) pg.autosave = I(9) != 0;
         pg.e.clear(); pg.spots.clear(); pg.end = -1; pg.practised.clear();
         pg.synced = false; pg.have = true; pg.version++;
         g_psel = 0; g_pday.clear(); g_pg_a = g_pg_b = -1;
@@ -393,6 +396,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
         pg.autofinish = I(2) != 0; pg.saveat_here = I(3) != 0; pg.daystart = I(4); pg.today = A(5);
         if (argc >= 7 && I(6) >= 5 && I(6) != pg.bin) { pg.bin = I(6); pg.version++; }
         if (argc >= 8 && (I(7) != 0) != pg.zero_clock) { pg.zero_clock = I(7) != 0; pg.version++; }
+        if (argc >= 9) pg.autosave = I(8) != 0;
     } else if (v == "done") pg.synced = true;
     else if (v == "msg" && argc >= 3) toast(A(2));
     else if (v == "attempt" && argc >= 7) {
@@ -1690,6 +1694,10 @@ static void p_page_settings(int x, int y, int w, int h)
     mt(F_MC, lx, y + ty, M_DIM, "log finished runs");
     if (p_button(PB_AUTO_YES, cx, y, 40, "Yes", true, pg.autofinish ? 1 : 0) && !pg.autofinish) { pg.autofinish = true; p_send("sm_progui set autofinish 1"); }
     if (p_button(PB_AUTO_NO, cx + BT(42), y, 40, "No", true, pg.autofinish ? 0 : 1) && pg.autofinish) { pg.autofinish = false; p_send("sm_progui set autofinish 0"); }
+    y += rh;
+    mt(F_MC, lx, y + ty, M_DIM, "auto progsave");   // each time an attempt gets back to the start zone
+    if (p_button(PB_AUTOSAVE_YES, cx, y, 40, "Yes", true, pg.autosave ? 1 : 0) && !pg.autosave) { pg.autosave = true; p_send("sm_progui set autosave 1"); }
+    if (p_button(PB_AUTOSAVE_NO, cx + BT(42), y, 40, "No", true, pg.autosave ? 0 : 1) && pg.autosave) { pg.autosave = false; p_send("sm_progui set autosave 0"); }
     y += rh;
     mt(F_MC, lx, y + ty, M_DIM, "progsave ends at");
     if (p_button(PB_SAVEAT_FAIL, cx, y, 70, "last fail", true, pg.saveat_here ? 0 : 1) && pg.saveat_here) { pg.saveat_here = false; p_send("sm_progui set saveat 0"); }
