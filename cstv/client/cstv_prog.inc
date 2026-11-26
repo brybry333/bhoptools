@@ -18,14 +18,16 @@
 // Everything is run time (seconds). "End" is a spot like the others but one time: your estimated finish, the
 // 100 % that percentages show against. The other spots are a range (where you get to a place, varying).
 //
-// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero> <autosave>
+// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero> <autosave> <filter> "<past>"
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
-//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero> <autosave>
+//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero> <autosave> <filter> "<past>"
 //                   prog_ui done | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | spotrename "<old>" "<new>"
 //                   set autofinish|saveat|zero|autosave|bin <n>   (zero 1: run time 0 shows as 0:00, 0: as start;
-//                   autosave 1: progsave on its own each time an attempt gets back to a start zone)
+//                   autosave 1: progsave on its own each time an attempt gets back to a start zone;
+//                   filter: page 1 shows 0 all, 1 runs from Start, 2 practice) | past "<time or spot>"
+//                   (page 1 shows only attempts that got that far; "" = all)
 // Included into cstv_gui.cpp (its fonts, input and primitives).
 #include <functional>
 #ifndef _WIN32
@@ -41,6 +43,8 @@ static struct {
     bool autofinish = true, saveat_here = false, synced = false, have = false;
     bool zero_clock = false;      // run time 0 (Start, a typed 0) shows as 0:00 instead of start
     bool autosave = false;        // progsave on its own each time an attempt gets back to a start zone
+    int filter = 0;               // page 1 shows: 0 all, 1 runs (from Start), 2 practice
+    std::string past;             // and only attempts that got this far: a run time or a spot ("" = all)
     std::vector<PEntry> e;        // by id
     std::vector<PSpot> spots;     // by where they start; "End" among them
     float end = -1;               // the spot "End": your estimated finish
@@ -58,6 +62,7 @@ static int g_psel;                               // the attempt being changed (i
 static std::string g_pe_from, g_pe_to, g_padd_from, g_padd_to, g_pend, g_pend2;
 static std::string g_pspot_name, g_pspot_lo, g_pspot_hi, g_pspot_edit;   // the spot form; the spot it changes ("" = new)
 static int g_pscroll, g_pscroll_spots;
+static std::string g_ppast;                      // page 1's "past" input
 static int g_pall;                               // the input whose whole text is picked (Tab, arrows): typing replaces it
 static int g_pg_mode;                            // the graph: 0 where attempts end, 1 how far runs from start get
 static int g_pg_a = -1, g_pg_b = -1;             // its days: an index into g_pdays, g_pdays.size() = all days, -1 latest / none
@@ -66,8 +71,8 @@ static std::vector<std::string> g_pdays;         // days with entries, oldest fi
 
 // ids: inputs 900-999 (picked whole when arrived at by keys), buttons and links 1000-1999, rows 100000 + entry id
 // (page 1) and 200000 + spot index (page 4)
-enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2 };
-enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
+enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2, PI_PAST = 930 };
+enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_FILTER, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
        PB_A_NEXT, PB_B_PREV, PB_B_NEXT, PB_SPOT_ADD = 1030, PB_SPOT_CANCEL, PB_SPOT_DEL, PB_END2 = 1040, PB_AUTO_YES, PB_AUTO_NO,
        PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_AUTOSAVE_YES, PB_AUTOSAVE_NO, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
 enum { PR_ENTRY = 100000, PR_SPOT = 200000 };
@@ -193,6 +198,72 @@ static bool p_from_start(const PEntry &e) { return !strcasecmp(e.from.c_str(), "
 static bool p_to_end(const PEntry &e) { return !strcasecmp(e.to.c_str(), "End") || (pg.end > 0 && e.tt >= pg.end - 0.01f); }
 static bool p_fail(const PEntry &e) { return p_from_start(e) && !p_to_end(e) && e.tt >= 0; }   // practice isn't a fail
 static float p_reach(const PEntry &e) { return p_to_end(e) && pg.end > 0 ? pg.end : e.tt; }   // how far it got
+
+// a typed run time, read as the backend reads it: "1:00", "3:33.5", "1:02:03"; digits alone like a timer ("224" =
+// 2:24, "45" = 0:45); a trailing s = seconds ("95s")
+static bool p_parse_clock(std::string s, float &out)
+{
+    bool secs = !s.empty() && (s.back() == 's' || s.back() == 'S');
+    if (secs) s.pop_back();
+    if (s.empty()) return false;
+    int total = 0, part = 0, whole = 0, colons = 0;
+    float frac = 0, scale = 0.1f;
+    bool dot = false;
+    for (char c : s) {
+        if (c >= '0' && c <= '9') {
+            if (dot) { frac += (c - '0') * scale; scale *= 0.1f; }
+            else if (++whole > 6) return false;
+            else part = part * 10 + (c - '0');
+        } else if (c == ':' && !dot && whole && colons < 2) {
+            total = (total + part) * 60;
+            part = 0;
+            whole = 0;
+            colons++;
+        } else if (c == '.' && !dot) dot = true;
+        else return false;
+    }
+    if (!whole) return false;
+    if (!colons && !secs && whole > 2) {
+        int ss = part % 100, mm = part / 100 % 100, hh = part / 10000;
+        if (ss >= 60 || (hh && mm >= 60)) return false;
+        part = (hh * 60 + mm) * 60 + ss;
+    }
+    out = (float)(total + part) + frac;
+    return true;
+}
+
+static const PSpot *p_spot_named(const std::string &n)
+{
+    for (const PSpot &s : pg.spots) if (!strcasecmp(s.name.c_str(), n.c_str())) return &s;
+    return nullptr;
+}
+
+// page 1's "past" filter as a run time: a time, or through a spot (its end); -1 = none (empty, or a spot that's gone)
+static float p_past_time()
+{
+    float t;
+    if (pg.past.empty()) return -1;
+    if (p_parse_clock(pg.past, t)) return t;
+    const PSpot *s = p_spot_named(pg.past);
+    return s ? p_spot_hi(*s) : -1;
+}
+
+// what page 1 shows of a day: the filter's kind (all / runs from Start / practice) and "past"; with each one's
+// number in the day, so a filtered row still says which try it was
+static void p_filtered(const std::vector<const PEntry *> &day, std::vector<const PEntry *> &out, std::vector<int> &nums)
+{
+    float past = p_past_time();
+    out.clear();
+    nums.clear();
+    for (size_t i = 0; i < day.size(); i++) {
+        const PEntry &e = *day[i];
+        bool start = p_from_start(e);
+        if ((pg.filter == 1 && !start) || (pg.filter == 2 && start)) continue;
+        if (past >= 0 && !(e.tt >= 0 && p_reach(e) >= past)) continue;
+        out.push_back(day[i]);
+        nums.push_back((int)i + 1);
+    }
+}
 
 static void p_spots_changed()
 {
@@ -361,6 +432,9 @@ static void p_apply(int argc, const char *const *argv, bool test)
         if (argc >= 8 && I(7) >= 5) pg.bin = I(7);
         if (argc >= 9) pg.zero_clock = I(8) != 0;
         if (argc >= 10) pg.autosave = I(9) != 0;
+        if (argc >= 11) pg.filter = std::min(std::max(I(10), 0), 2);
+        if (argc >= 12) pg.past = A(11);
+        if (g_focus != PI_PAST) g_ppast = pg.past;
         pg.e.clear(); pg.spots.clear(); pg.end = -1; pg.practised.clear();
         pg.synced = false; pg.have = true; pg.version++;
         g_psel = 0; g_pday.clear(); g_pg_a = g_pg_b = -1;
@@ -397,6 +471,8 @@ static void p_apply(int argc, const char *const *argv, bool test)
         if (argc >= 7 && I(6) >= 5 && I(6) != pg.bin) { pg.bin = I(6); pg.version++; }
         if (argc >= 8 && (I(7) != 0) != pg.zero_clock) { pg.zero_clock = I(7) != 0; pg.version++; }
         if (argc >= 9) pg.autosave = I(8) != 0;
+        if (argc >= 10) pg.filter = std::min(std::max(I(9), 0), 2);
+        if (argc >= 11) { pg.past = A(10); if (g_focus != PI_PAST) g_ppast = pg.past; }
     } else if (v == "done") pg.synced = true;
     else if (v == "msg" && argc >= 3) toast(A(2));
     else if (v == "attempt" && argc >= 7) {
@@ -1165,7 +1241,9 @@ static void p_page_log(int x, int y, int w, int h)
     const int bottom = y + h;
     std::string day = p_viewday();
     bool today = day == pg.today;
-    std::vector<const PEntry *> list = p_day_entries(day);
+    std::vector<const PEntry *> whole = p_day_entries(day), list;
+    std::vector<int> nums;
+    p_filtered(whole, list, nums);
     p_aggregate();
     int prev = -1, next = -1;
     for (int i = 0; i < (int)g_pdays.size(); i++) {
@@ -1191,14 +1269,42 @@ static void p_page_log(int x, int y, int w, int h)
         cx = x;
         cx += mt(F_MC, cx, y, M_DIM, std::to_string(st.tries) + (st.tries == 1 ? " try  \xC2\xB7  best " : " tries  \xC2\xB7  best "));
         mt(F_MC, cx, y, st.best >= 0 ? M_BLUE : M_FAINT, p_clock(st.best));
-    } else mt(F_MC, x, y, M_FAINT, "nothing logged this day");
+    } else mt(F_MC, x, y, M_FAINT, whole.empty() ? "nothing logged this day" : "nothing matches the filter");
+    y += BT(12);
+    // the filter, a line of its own: all / runs (from Start) / practice, and "past" a run time or a spot
+    {
+        static const char *const kinds[3] = {"all", "runs", "practice"};
+        int fx = x;
+        for (int i = 0; i < 3; i++) {
+            int f = i == pg.filter ? F_MCB : F_MC;
+            if (p_link(PB_FILTER + i, fx, y, kinds[i], true, f, i == pg.filter ? M_INK : M_DIM) && i != pg.filter) {
+                pg.filter = i;
+                g_pscroll = 0;
+                p_send("sm_progui set filter %d", i);
+            }
+            fx += mt_w(f, kinds[i]) + BT(8);
+        }
+        fx += BT(4);
+        fx += mt(F_MC, fx, y, M_DIM, "past") + BT(4);
+        if (p_input(PI_PAST, g_ppast, 15, fx, y, BT(56), "0:30")) {   // Enter: on (empty = off)
+            std::string t = p_clean(g_ppast);
+            float secs;
+            if (t.empty() || p_parse_clock(t, secs) || p_spot_named(t)) {
+                pg.past = g_ppast = t;
+                g_pscroll = 0;
+                g_focus = 0;
+                p_send("sm_progui past \"%s\"", t.c_str());
+            } else toast("past: a run time like 1:30, or a spot");
+        }
+    }
     y += BT(14);
     p_entry_form(x, y, w);
-    list = p_day_entries(day);   // the form saves at once: an added attempt can move pg.e in memory
+    whole = p_day_entries(day);   // the form saves at once: an added attempt can move pg.e in memory
+    p_filtered(whole, list, nums);
     y += BT(28);
 
     // the bars, newest on top (the attempt being played first)
-    bool live = today && pg.att && pg.att_now >= 0;
+    bool live = today && pg.att && pg.att_now >= 0 && (pg.filter == 0 || (pg.filter == 1) == (pg.att_ft >= 0 && pg.att_ft < 0.5f));
     // columns: the row's number (or "now"), its label, the XP bar (fixed: the game's picture), the % at the right;
     // the label gets what's left, so nothing runs into the next column
     int idxw = std::max(mt_w(F_MC, "now"), mt_w(F_MC, "100")) + BT(3);
@@ -1244,7 +1350,7 @@ static void p_page_log(int x, int y, int w, int h)
         if (sel) rect(x - BT(2), ry, w + BT(4), rh, M_SEL);
         else if (hv || kb) rect(x - BT(2), ry, w + BT(4), rh, M_HOVER);
         char num[12];
-        snprintf(num, sizeof num, "%d", (int)list.size() - (i - base_live));
+        snprintf(num, sizeof num, "%d", nums[list.size() - 1 - (i - base_live)]);
         mt(F_MC, x, ty, kb ? M_INK : M_FAINT, kb ? ">" : num);
         mt(F_MC, x + idxw, ty, sel ? M_BLUE : M_INK, p_entry_text(e), labw - BT(4));
         p_xp(tr.x, by, tr.scale, e.ft, e.tt, p_bar_kind(p_from_start(e), fin));

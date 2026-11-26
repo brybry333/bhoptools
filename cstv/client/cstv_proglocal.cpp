@@ -177,6 +177,8 @@ struct {
     bool autofinish = true, saveat_here = false;
     bool zero_clock = false;   // run time 0 (Start, a typed 0) shows as "0:00" instead of "Start"
     bool autosave = false;     // !progsave on its own each time an attempt gets back to a start zone
+    int filter = 0;            // which attempts the log page shows: 0 all, 1 runs (from Start), 2 practice
+    std::string past;          // and only those that got this far: a run time or a spot's name ("" = all)
     int bin = 10, daystart = 5;
     bool loaded = false;
 } S;
@@ -265,6 +267,7 @@ void load_settings()
         size_t b = d.find('\n', a);
         std::string line = d.substr(a, b == std::string::npos ? std::string::npos : b - a);
         a = b == std::string::npos ? d.size() : b + 1;
+        if (!strncmp(line.c_str(), "past ", 5)) { S.past = sanitize(line.substr(5)).substr(0, MAX_TEXT - 1); continue; }
         char key[32];
         int v;
         if (sscanf(line.c_str(), "%31s %d", key, &v) != 2) continue;
@@ -272,6 +275,7 @@ void load_settings()
         else if (!strcmp(key, "saveat")) S.saveat_here = v != 0;
         else if (!strcmp(key, "zero")) S.zero_clock = v != 0;
         else if (!strcmp(key, "autosave")) S.autosave = v != 0;
+        else if (!strcmp(key, "filter")) S.filter = v < 0 || v > 2 ? 0 : v;
         else if (!strcmp(key, "bin")) S.bin = v < 5 ? 5 : v > 60 ? 60 : v;
         else if (!strcmp(key, "daystart")) S.daystart = v < 0 ? 0 : v > 23 ? 23 : v;
     }
@@ -280,9 +284,9 @@ void load_settings()
 void save_settings()
 {
     char b[160];
-    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nautosave %d\nbin %d\ndaystart %d\n", S.autofinish, S.saveat_here,
-             S.zero_clock, S.autosave, S.bin, S.daystart);
-    write_file(dir_path() + SEP + "settings.txt", b);
+    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nautosave %d\nfilter %d\nbin %d\ndaystart %d\n", S.autofinish,
+             S.saveat_here, S.zero_clock, S.autosave, S.filter, S.bin, S.daystart);
+    write_file(dir_path() + SEP + "settings.txt", std::string(b) + (S.past.empty() ? "" : "past " + S.past + "\n"));
 }
 
 // Format: "progresslog 1", then per attempt  e <id> <day> <created> <source> <from> <from s> <to> <to s> <track>
@@ -417,13 +421,13 @@ void send_entry(const Entry &e)
 void send_cfg()
 {
     apply({"prog_ui", "cfg", S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0", std::to_string(S.daystart), day_of(time(nullptr)), std::to_string(S.bin),
-           S.zero_clock ? "1" : "0", S.autosave ? "1" : "0"});
+           S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past});
 }
 
 void sync_book()
 {
     apply({"prog_ui", "reset", M.map, day_of(time(nullptr)), std::to_string(S.daystart), S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0",
-           std::to_string(S.bin), S.zero_clock ? "1" : "0", S.autosave ? "1" : "0"});
+           std::to_string(S.bin), S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past});
     for (const Entry &e : M.e) send_entry(e);
     for (const Spot &s : M.s) apply({"prog_ui", "s", s.name, num(s.lo), num(s.hi)});
     for (const auto &p : M.t) apply({"prog_ui", "t", p.first, std::to_string((long)p.second)});
@@ -557,6 +561,11 @@ void rename_spot(const std::string &old_in, const std::string &new_in)
     save_map();
     apply({"prog_ui", "sd", was});
     if (Spot *n = find_spot(to)) apply({"prog_ui", "s", n->name, num(n->lo), num(n->hi)});
+    if (!strcasecmp(S.past.c_str(), was.c_str())) {   // the log's "past" filter named it: it follows
+        S.past = to;
+        save_settings();
+        send_cfg();
+    }
 }
 
 void delete_spot(const std::string &input)
@@ -1362,12 +1371,18 @@ void pl_command(const char *line)
         else apply({"prog_ui", "msg", "times like 3:40 and 3:55"});
     } else if (verb == "spotdel") delete_spot(a);
     else if (verb == "spotrename") rename_spot(a, b);
+    else if (verb == "past") {   // the log's "past" filter: a run time or a spot's name, "" = off
+        S.past = sanitize(a).substr(0, MAX_TEXT - 1);
+        save_settings();
+        send_cfg();
+    }
     else if (verb == "set") {
         int n = atoi(b.c_str());
         if (a == "autofinish") S.autofinish = n != 0;
         else if (a == "saveat") S.saveat_here = n != 0;
         else if (a == "zero") S.zero_clock = n != 0;
         else if (a == "autosave") S.autosave = n != 0;
+        else if (a == "filter") S.filter = n < 0 || n > 2 ? 0 : n;
         else if (a == "bin") S.bin = n < 5 ? 5 : n > 60 ? 60 : n;
         save_settings();
         send_cfg();
