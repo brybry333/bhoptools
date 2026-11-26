@@ -1003,13 +1003,11 @@ struct {
     double last_at = 0, sample_at = 0, live_at = 0;
     std::vector<Sample> trace, best;   // this run's path; the longest one this map had
     std::string lost;             // why the last teleport started no attempt
-    // the last attempt that got back to a start zone (a fail teleport, a restart, a death, or walked back after a
-    // while): !progsave saves it, to its time just before, while in the start zone or for FAIL_WINDOW after (one-shot
-    // maps: you're off again by then) unless the new attempt failed itself. A finished run clears it.
+    // the last attempt that got back to a start zone (a restart, a one-shot map's fail teleport, a respawn, walking
+    // back): !progsave in the start zone saves it, to its run time just before. A finished run clears it.
     bool ended = false;
     std::string ended_from;
     float ended_ft = -1, ended_tt = -1;
-    double ended_at = 0;
     int ended_track = 0, ended_entry = 0;
 } R;
 
@@ -1068,28 +1066,11 @@ bool have_zones()
     return !g_zones.empty();
 }
 
-// How far the run got, for an end at run time `clock`: the time it first reached the place it's at, so standing there
-// (before a restart, a fail, a save) doesn't count as getting further. This run's path backwards from its end while
-// it stays within a player's width of the last point; under half a second of that (still moving) keeps the clock.
-float reached(float clock)
-{
-    if (R.trace.empty()) return clock;
-    const Sample &end = R.trace.back();
-    float t = end.t;
-    for (size_t i = R.trace.size(); i-- > 0;) {
-        const Sample &s = R.trace[i];
-        float dx = s.p[0] - end.p[0], dy = s.p[1] - end.p[1], dz = s.p[2] - end.p[2];
-        if (dx * dx + dy * dy > 48 * 48 || fabsf(dz) > 80) break;
-        t = s.t;
-    }
-    return clock - t >= 0.5f && t >= 0 ? t : clock;
-}
-
 // where the attempt ended: the last fail if it was recent, else where you are
 float attempt_end(double now)
 {
     if (!S.saveat_here && R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW) return R.fail_time;
-    return reached(run_time(now));
+    return run_time(now);
 }
 
 // !progsave's entry for an attempt: a new one, or the one it saved before (entry) changed to the new end
@@ -1114,9 +1095,8 @@ void progsave()
 {
     double now = plat_now();
     bool running = R.att && R.state == R_RUN;
-    // sent back to the start (one-shot maps, a restart): the attempt that ended there, from the start zone or soon
-    // after (as "last fail" saves a recent fail), unless the attempt since has a fail of its own or "where I am" is on
-    if (R.ended && (R.state == R_IN_START || (!S.saveat_here && now - R.ended_at < FAIL_WINDOW && !(running && R.fail_at > R.att_at)))) {
+    // in the start zone: the attempt that just ended there (a restart, a one-shot map's fail teleport, a respawn)
+    if (R.state == R_IN_START && R.ended) {
         save_attempt(R.ended_entry, R.ended_from, R.ended_ft, R.ended_tt, R.ended_track);
         return;
     }
@@ -1147,34 +1127,34 @@ void tick()
     if (!read_me(me)) return;
     double now = plat_now();
     if (!me.alive) {
-        if (R.alive && R.state == R_RUN && R.att) { R.fail_time = reached(run_time(now)); R.fail_at = now; }
+        if (R.alive && R.state == R_RUN && R.att) { R.fail_time = run_time(now); R.fail_at = now; }
         R.alive = false;
         R.have = false;
         return;
     }
     R.alive = true;
     bool tele = false;
+    float d2 = 0;
     if (R.have) {
-        float d2 = 0, v2 = 0;
+        float v2 = 0;
         // (speed as |x| + |y| + |z|, a bit over the real one: no sqrtf, a glibc 2.43 symbol here, too new for Steam's runtime)
         for (int i = 0; i < 3; i++) { float x = me.pos[i] - R.last[i]; d2 += x * x; v2 += fabsf(me.vel[i]); }
-        float dt = (float)std::min(now - R.last_at, 0.25), reach = v2 * dt * 2 + 64 + 3500 * dt * (NV.vel < 0);
+        // a teleport: farther than twice your speed covers in a tenth of a second (at least). A booster pushes you
+        // on the server only, and the prediction correction moves you ~100 units at once: that isn't one.
+        float dt = (float)std::min(now - R.last_at, 0.25), reach = v2 * std::max(dt, 0.1f) * 2 + 64 + 3500 * dt * (NV.vel < 0);
         tele = d2 > reach * reach;
     }
     int start = zone_at(me.pos, me.ducked, 0);
     if (start >= 0) {
-        // back in a start zone mid-attempt. It's the attempt !progsave saves when it failed: the map sent you here
-        // (a one-shot map's fail teleport), or it fell or died just before (then a restart, a respawn); or when it
-        // got 2 s into the map (by where you got, not the clock). Restarting or walking back in from fiddling around
-        // the start (prestrafing, standing there) keeps the attempt before.
-        bool failed = R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW;
-        float got = R.state == R_RUN && R.att && R.last_time >= 0 ? reached(R.last_time) : -1;
-        if (got >= 0 && ((tele && near_dest(me.pos)) || failed || got - R.ft >= 2.0f)) {
+        // back in a start zone mid-attempt (a restart, a one-shot map's fail teleport, a respawn, walking back): the
+        // attempt ends here, at its run time just before ("last fail": a fail it had in the last 20 s, as a restart
+        // after falling somewhere else). !progsave in the start zone saves it.
+        if (R.state == R_RUN && R.att && R.last_time >= 0) {
+            bool failed = !S.saveat_here && R.fail_at > R.att_at && now - R.fail_at < FAIL_WINDOW;
             R.ended = true;
             R.ended_from = R.from;
             R.ended_ft = R.ft;
-            R.ended_tt = failed ? R.fail_time : got;   // the fail, else how far it got (not time spent standing)
-            R.ended_at = now;
+            R.ended_tt = failed ? R.fail_time : R.last_time;
             R.ended_track = R.track;
             R.ended_entry = R.att_entry;
         }
@@ -1190,10 +1170,13 @@ void tick()
         begin_attempt("Start", 0, now);
     } else if (tele && (R.state == R_RUN || R.state == R_DONE || R.state == R_IN_START)) {
         if (near_dest(me.pos)) {   // the map sent you back: a fail (the attempt goes on, as shavit's timer does)
-            if (R.state == R_RUN && R.att) { R.fail_time = reached(R.last_time); R.fail_at = now; }
+            if (R.state == R_RUN && R.att) { R.fail_time = R.last_time; R.fail_at = now; }
         } else {                   // a checkpoint loaded: an attempt from your time there
             float t = time_at(me.pos);
-            if (t >= 0) {
+            bool running = R.state == R_RUN && R.att;
+            if (running && (t < 0 ? d2 < 1024.0f * 1024.0f : fabsf(t - run_time(now)) < 1.0f)) {
+                // a short jump to nowhere known, or onto this run's own time: the run goes on (as shavit's timer does)
+            } else if (t >= 0) {
                 R.state = R_RUN;
                 R.t0 = now - t;
                 begin_attempt(clock_text(t), t, now);
