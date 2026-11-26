@@ -43,6 +43,7 @@ bool cstv_enabled();                      // bhoptools' Options switch (cstv_ena
 void cstv_helper_line(const char *line);  // send one line to cstvd (no trailing newline needed)
 void cstv_print(const char *text);        // a CS:TV chat line for this player only
 void cstv_chat_line(const char *line);    // a chat line as it is (colour codes and all) for this player only
+void cstv_chat_quiet(const char *line);   // the same, without the chat sound (TextMsg, not SayText)
 void cstv_volume_preview(int vol);        // the volume slider while it's dragged (0-100; pref vol saves it)
 std::string b64encode(const std::string &in);              // base64url without padding, as cstvd and the hub use it
 bool b64decode(const std::string &in, std::string &out);   // false on anything else; "-" (the protocol's empty value) gives ""

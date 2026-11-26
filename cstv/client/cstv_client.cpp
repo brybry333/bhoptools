@@ -558,7 +558,7 @@ static void update_where()
 // A chat line for this player only: a SayText user message (id 3 in CS:S: 4th registered in client.so's
 // RegisterUserMessages, after Geiger, Train, HudText) handed to the client as if the server sent it.
 // bWantsToChat = 0 prints it through the HUD chat's Printf (no Steam text filter on it).
-enum { USERMSG_SAYTEXT = 3 };
+enum { USERMSG_SAYTEXT = 3, USERMSG_TEXTMSG = 5 };   // CS:S's RegisterUserMessages order (server.so)
 
 void cstv_print(const char *text) { cstv_chat_line((std::string(" \x04[CS:TV]\x01 ") + text).c_str()); }
 
@@ -583,6 +583,30 @@ void cstv_chat_line(const char *line)
     msg->m_nDataBits = (int)n * 8;
     msg->m_iCurBit = 0;
     g_client->DispatchUserMessage(USERMSG_SAYTEXT, *msg);
+}
+
+// The same line without the chat sound: SayText always plays HudChat.Message, TextMsg to HUD_PRINTTALK prints into the
+// chat the same way (colour codes too) and plays nothing. Its 4 substitution strings are empty.
+void cstv_chat_quiet(const char *line)
+{
+    std::string s = line;
+    if (s.size() > 250) s.resize(250);
+    for (auto &c : s)
+        if (c == '\n' || c == '\r') c = ' ';
+    if (!g_engine || !g_client || !g_engine->IsInGame()) { say("%s", line); return; }
+    alignas(8) unsigned char data[272] = {0};   // bf_read reads whole words: padded
+    size_t n = 0;
+    data[n++] = 3;   // HUD_PRINTTALK
+    memcpy(data + n, s.c_str(), s.size() + 1);
+    n += s.size() + 1;
+    for (int i = 0; i < 4; i++) data[n++] = 0;   // %s1..%s4
+    alignas(bf_read) unsigned char raw[sizeof(bf_read)] = {0};
+    bf_read *msg = reinterpret_cast<bf_read *>(raw);
+    msg->m_pData = data;
+    msg->m_nDataBytes = (int)n;
+    msg->m_nDataBits = (int)n * 8;
+    msg->m_iCurBit = 0;
+    g_client->DispatchUserMessage(USERMSG_TEXTMSG, *msg);
 }
 
 // ---------------------------------------------------------------- textures

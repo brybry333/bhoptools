@@ -18,13 +18,13 @@
 // Everything is run time (seconds). "End" is a spot like the others but one time: your estimated finish, the
 // 100 % that percentages show against. The other spots are a range (where you get to a place, varying).
 //
-// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero> <autosave> <filter> "<past>"
+// From the backend: prog_ui reset "<map>" <today> <daystart> <autofinish> <saveat> <bin> <zero> <autosave> <filter> "<past>" <chatsound>
 //                   prog_ui e <id> <day> <created> <source> "<from>" <from s> "<to>" <to s>    (-1 = no time)
-//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero> <autosave> <filter> "<past>"
+//                   prog_ui d <id> | s "<spot>" <s> <to s> | sd "<spot>" | cfg <autofinish> <saveat> <daystart> <today> <bin> <zero> <autosave> <filter> "<past>" <chatsound>
 //                   prog_ui done | msg "<text>" | attempt <0/1> "<from>" <from s> <now s> <last fail s>
 // To the backend:  sm_progui sync | view 0/1 | add "<from>" "<to>" | edit <id> from|to "<text>"
 //                   del <id> | spot "<name>" "<from>" ["<to>"] | spotdel "<name>" | spotrename "<old>" "<new>"
-//                   set autofinish|saveat|zero|autosave|bin <n>   (zero 1: run time 0 shows as 0:00, 0: as start;
+//                   set autofinish|saveat|zero|autosave|filter|chatsound|bin <n>   (zero 1: run time 0 shows as 0:00, 0: as start;
 //                   autosave 1: progsave on its own each time an attempt gets back to a start zone;
 //                   filter: page 1 shows 0 all, 1 runs from Start, 2 practice) | past "<time or spot>"
 //                   (page 1 shows only attempts that got that far; "" = all)
@@ -45,6 +45,7 @@ static struct {
     bool autosave = false;        // progsave on its own each time an attempt gets back to a start zone
     int filter = 0;               // page 1 shows: 0 all, 1 runs (from Start), 2 practice
     std::string past;             // and only attempts that got this far: a run time or a spot ("" = all)
+    bool chat_sound = true;       // the [Prog] chat lines play the chat sound
     std::vector<PEntry> e;        // by id
     std::vector<PSpot> spots;     // by where they start; "End" among them
     float end = -1;               // the spot "End": your estimated finish
@@ -72,7 +73,7 @@ static std::vector<std::string> g_pdays;         // days with entries, oldest fi
 // ids: inputs 900-999 (picked whole when arrived at by keys), buttons and links 1000-1999, rows 100000 + entry id
 // (page 1) and 200000 + spot index (page 4)
 enum { PI_EDIT_FROM = 910, PI_EDIT_TO, PI_ADD_FROM, PI_ADD_TO, PI_END = 920, PI_SPOT_NAME, PI_SPOT_LO, PI_SPOT_HI, PI_END2, PI_PAST = 930 };
-enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_FILTER, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
+enum { PB_ADD = 1001, PB_SAVE, PB_DEL, PB_CANCEL, PB_DAY_PREV = 1010, PB_DAY_NEXT, PB_END, PB_FILTER, PB_CHATSND_YES = 1016, PB_CHATSND_NO, PB_MODE0 = 1020, PB_MODE1, PB_A_PREV,
        PB_A_NEXT, PB_B_PREV, PB_B_NEXT, PB_SPOT_ADD = 1030, PB_SPOT_CANCEL, PB_SPOT_DEL, PB_END2 = 1040, PB_AUTO_YES, PB_AUTO_NO,
        PB_SAVEAT_FAIL, PB_SAVEAT_HERE, PB_ZERO_START, PB_ZERO_CLOCK, PB_AUTOSAVE_YES, PB_AUTOSAVE_NO, PB_BIN = 1050, PB_DONE = 1090, PB_BACK, PB_FWD, PB_TAB = 1100, PB_YES = 1201, PB_NO };
 enum { PR_ENTRY = 100000, PR_SPOT = 200000 };
@@ -435,6 +436,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
         if (argc >= 11) pg.filter = std::min(std::max(I(10), 0), 2);
         if (argc >= 12) pg.past = A(11);
         if (g_focus != PI_PAST) g_ppast = pg.past;
+        if (argc >= 13) pg.chat_sound = I(12) != 0;
         pg.e.clear(); pg.spots.clear(); pg.end = -1; pg.practised.clear();
         pg.synced = false; pg.have = true; pg.version++;
         g_psel = 0; g_pday.clear(); g_pg_a = g_pg_b = -1;
@@ -473,6 +475,7 @@ static void p_apply(int argc, const char *const *argv, bool test)
         if (argc >= 9) pg.autosave = I(8) != 0;
         if (argc >= 10) pg.filter = std::min(std::max(I(9), 0), 2);
         if (argc >= 11) { pg.past = A(10); if (g_focus != PI_PAST) g_ppast = pg.past; }
+        if (argc >= 12) pg.chat_sound = I(11) != 0;
     } else if (v == "done") pg.synced = true;
     else if (v == "msg" && argc >= 3) toast(A(2));
     else if (v == "attempt" && argc >= 7) {
@@ -942,6 +945,43 @@ static bool p_button(int id, int x, int y, int w, const std::string &label, bool
     return go;
 }
 
+// Minecraft's slider, as its options draw it: the dark (disabled) button as the track, an 8 px slice of the button as
+// the knob (highlighted under the mouse), the value written on it in white. A click or drag moves it: t (0..1) follows
+// the mouse while the button is held (true then); *released on the frame it's let go (with the button's click).
+static bool p_slider(int id, int x, int y, int w, float &t, const std::string &label, bool *released)
+{
+    int W = BT(w), H = BT(20), K = BT(8);
+    if (take_click(x, y, W, H)) g_drag = id;
+    bool drag = g_drag == id;
+    *released = false;
+    if (drag) {
+        t = std::min(std::max((float)(g_mx - x - K / 2) / std::max(1, W - K), 0.0f), 1.0f);
+        if (!in.down) {
+            g_drag = 0;
+            *released = true;
+            p_sound("click");
+        }
+    }
+    bool hv = drag || hover(x, y, W, H);
+    int kx = x + (int)(std::min(std::max(t, 0.0f), 1.0f) * (W - K));
+    if (g_part) {
+        int half = w / 2;
+        p_part(g_pui, PS_BUTTON_OFF, 0, 0, half, 20, x, y, BT(half), H);
+        p_part(g_pui, PS_BUTTON_OFF, 200 - (w - half), 0, w - half, 20, x + BT(half), y, BT(w - half), H);
+        int knob = hv ? PS_BUTTON_HL : PS_BUTTON;
+        p_part(g_pui, knob, 0, 0, 4, 20, kx, y, BT(4), H);
+        p_part(g_pui, knob, 196, 0, 4, 20, kx + BT(4), y, BT(4), H);
+    } else {
+        rect(x, y, W, H, M_INK);
+        rect(x + BT(1), y + BT(1), W - BT(2), H - BT(2), Col{44, 44, 44, 255});
+        rect(kx, y, K, H, M_INK);
+        rect(kx + BT(1), y + BT(1), K - BT(2), H - BT(2), hv ? Col{120, 130, 190, 255} : Col{110, 110, 110, 255});
+    }
+    int tw = std::min(mt_w(F_MC, label), W - BT(8));
+    p_stext(F_MC, x + (W - tw) / 2, y + BT(6), M_WHITE, label, W - BT(8));
+    return drag;
+}
+
 // a word you click, like a link in a written book: blue and underlined under the mouse or the keyboard
 static bool p_link(int id, int x, int y, const std::string &label, bool enabled = true, int f = F_MCB, Col c = M_INK)
 {
@@ -1271,13 +1311,14 @@ static void p_page_log(int x, int y, int w, int h)
         mt(F_MC, cx, y, st.best >= 0 ? M_BLUE : M_FAINT, p_clock(st.best));
     } else mt(F_MC, x, y, M_FAINT, whole.empty() ? "nothing logged this day" : "nothing matches the filter");
     y += BT(12);
-    // the filter, a line of its own: all / runs (from Start) / practice, and "past" a run time or a spot
+    // the filter, a row of its own (button high, its words on the buttons' text line): all / runs (from Start) /
+    // practice, and "past" a run time or a spot, typed or on Minecraft's slider
     {
         static const char *const kinds[3] = {"all", "runs", "practice"};
-        int fx = x;
+        int fx = x, ty = y + BT(6);
         for (int i = 0; i < 3; i++) {
             int f = i == pg.filter ? F_MCB : F_MC;
-            if (p_link(PB_FILTER + i, fx, y, kinds[i], true, f, i == pg.filter ? M_INK : M_DIM) && i != pg.filter) {
+            if (p_link(PB_FILTER + i, fx, ty, kinds[i], true, f, i == pg.filter ? M_INK : M_DIM) && i != pg.filter) {
                 pg.filter = i;
                 g_pscroll = 0;
                 p_send("sm_progui set filter %d", i);
@@ -1285,9 +1326,9 @@ static void p_page_log(int x, int y, int w, int h)
             fx += mt_w(f, kinds[i]) + BT(8);
         }
         fx += BT(4);
-        fx += mt(F_MC, fx, y, M_DIM, "past") + BT(4);
+        fx += mt(F_MC, fx, ty, M_DIM, "past") + BT(4);
         // Enter: on (empty = off). The box keeps the keyboard with its text picked, so the next time typed replaces it.
-        if (p_input(PI_PAST, g_ppast, 15, fx, y, BT(56), "0:30")) {
+        if (p_input(PI_PAST, g_ppast, 15, fx, ty, BT(56), "0:30")) {
             std::string t = p_clean(g_ppast);
             float secs;
             if (t.empty() || p_parse_clock(t, secs) || p_spot_named(t)) {
@@ -1297,33 +1338,23 @@ static void p_page_log(int x, int y, int w, int h)
                 p_send("sm_progui past \"%s\"", t.c_str());
             } else toast("past: a run time like 1:30, or a spot");
         }
-        // and a slider for it: start .. your end (the bars' scale), the list follows while it's dragged, the backend
-        // hears the time once it's let go; all the way left = off
-        fx += BT(64);
-        int sw = x + w - fx, cy = y + mt_h(F_MC) / 2;
-        if (sw >= BT(30)) {
+        // the slider: start .. your end (the bars' scale); the list follows while it's dragged, the backend hears the
+        // time once it's let go; all the way left = off
+        fx += BT(62);
+        int sw = (x + w - fx) / BT(1);
+        if (sw >= 40) {
             const int DRAG_PAST = 4200;   // (g_drag: the CS:TV window's sliders use small numbers)
-            float scale = p_scale(), past = p_past_time();
-            if (take_click(fx - BT(3), y - BT(3), sw + BT(6), mt_h(F_MC) + BT(6))) g_drag = DRAG_PAST;
-            bool drag = g_drag == DRAG_PAST;
-            if (drag) {
-                float t = (float)(g_mx - fx) / sw * scale;
-                std::string v = t < 0.5f ? "" : p_clock(std::min(t, scale));
+            float scale = p_scale(), past = p_past_time(), t = past > 0 ? std::min(past, scale) / scale : 0;
+            bool released;
+            if (p_slider(DRAG_PAST, fx, y, sw, t, pg.past.empty() ? "off" : p_point(pg.past), &released)) {
+                float secs = t * scale;
+                std::string v = secs < 0.5f ? "" : p_clock(secs);
                 if (v != pg.past) { pg.past = g_ppast = v; g_pscroll = 0; }
-                past = p_past_time();
-                if (!in.down) {
-                    g_drag = 0;
-                    p_send("sm_progui past \"%s\"", pg.past.c_str());
-                }
             }
-            bool hv = drag || hover(fx - BT(3), y - BT(3), sw + BT(6), mt_h(F_MC) + BT(6));
-            int hx = past > 0 ? (int)(std::min(past, scale) / scale * sw) : 0;
-            rect(fx, cy, sw, BT(1), M_FAINT);
-            if (hx > 0) rect(fx, cy, hx, BT(1), M_INK);
-            rect(fx + hx - BT(1), cy - BT(4), BT(3), BT(9), hv ? M_BLUE : M_INK);
+            if (released) p_send("sm_progui past \"%s\"", pg.past.c_str());
         }
     }
-    y += BT(14);
+    y += BT(24);
     p_entry_form(x, y, w);
     whole = p_day_entries(day);   // the form saves at once: an added attempt can move pg.e in memory
     p_filtered(whole, list, nums);
@@ -1830,6 +1861,10 @@ static void p_page_settings(int x, int y, int w, int h)
     mt(F_MC, lx, y + ty, M_DIM, "Auto save");   // progsave on its own each time an attempt gets back to the start zone
     if (p_button(PB_AUTOSAVE_YES, cx, y, 40, "Yes", true, pg.autosave ? 1 : 0) && !pg.autosave) { pg.autosave = true; p_send("sm_progui set autosave 1"); }
     if (p_button(PB_AUTOSAVE_NO, cx + BT(42), y, 40, "No", true, pg.autosave ? 0 : 1) && pg.autosave) { pg.autosave = false; p_send("sm_progui set autosave 0"); }
+    y += rh;
+    mt(F_MC, lx, y + ty, M_DIM, "chat sound");   // the [Prog] lines in chat: with the chat's sound, or quiet
+    if (p_button(PB_CHATSND_YES, cx, y, 40, "Yes", true, pg.chat_sound ? 1 : 0) && !pg.chat_sound) { pg.chat_sound = true; p_send("sm_progui set chatsound 1"); }
+    if (p_button(PB_CHATSND_NO, cx + BT(42), y, 40, "No", true, pg.chat_sound ? 0 : 1) && pg.chat_sound) { pg.chat_sound = false; p_send("sm_progui set chatsound 0"); }
     y += rh;
     mt(F_MC, lx, y + ty, M_DIM, "progsave ends at");
     if (p_button(PB_SAVEAT_FAIL, cx, y, 70, "last fail", true, pg.saveat_here ? 0 : 1) && pg.saveat_here) { pg.saveat_here = false; p_send("sm_progui set saveat 0"); }

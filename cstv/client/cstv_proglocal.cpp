@@ -67,6 +67,8 @@ IBaseClientDLL *g_cli;
 IClientEntityList *g_ents;
 INetworkStringTableContainer *g_tables;
 
+void say_line(const std::string &line);   // the chat line, with or without its sound (the setting)
+
 void chat(const char *fmt, ...)
 {
     char buf[256];
@@ -74,7 +76,7 @@ void chat(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    cstv_chat_line((std::string(PREFIX) + buf).c_str());
+    say_line(std::string(PREFIX) + buf);
 }
 
 // ---------------------------------------------------------------- the book's lines
@@ -179,6 +181,7 @@ struct {
     bool autosave = false;     // !progsave on its own each time an attempt gets back to a start zone
     int filter = 0;            // which attempts the log page shows: 0 all, 1 runs (from Start), 2 practice
     std::string past;          // and only those that got this far: a run time or a spot's name ("" = all)
+    bool chat_sound = true;    // the [Prog] chat lines play the chat sound (off: printed without it)
     int bin = 10, daystart = 5;
     bool loaded = false;
 } S;
@@ -193,6 +196,12 @@ struct {
     std::vector<std::pair<std::string, double>> t;   // time practising per day: seconds out of the start zone, run timer going
     double t_unsaved = 0, t_saved_at = 0;
 } M;
+
+void say_line(const std::string &line)
+{
+    if (S.chat_sound) cstv_chat_line(line.c_str());
+    else cstv_chat_quiet(line.c_str());
+}
 
 double &practised(const std::string &day)
 {
@@ -276,6 +285,7 @@ void load_settings()
         else if (!strcmp(key, "zero")) S.zero_clock = v != 0;
         else if (!strcmp(key, "autosave")) S.autosave = v != 0;
         else if (!strcmp(key, "filter")) S.filter = v < 0 || v > 2 ? 0 : v;
+        else if (!strcmp(key, "chatsound")) S.chat_sound = v != 0;
         else if (!strcmp(key, "bin")) S.bin = v < 5 ? 5 : v > 60 ? 60 : v;
         else if (!strcmp(key, "daystart")) S.daystart = v < 0 ? 0 : v > 23 ? 23 : v;
     }
@@ -284,8 +294,8 @@ void load_settings()
 void save_settings()
 {
     char b[160];
-    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nautosave %d\nfilter %d\nbin %d\ndaystart %d\n", S.autofinish,
-             S.saveat_here, S.zero_clock, S.autosave, S.filter, S.bin, S.daystart);
+    snprintf(b, sizeof b, "autofinish %d\nsaveat %d\nzero %d\nautosave %d\nfilter %d\nchatsound %d\nbin %d\ndaystart %d\n",
+             S.autofinish, S.saveat_here, S.zero_clock, S.autosave, S.filter, S.chat_sound, S.bin, S.daystart);
     write_file(dir_path() + SEP + "settings.txt", std::string(b) + (S.past.empty() ? "" : "past " + S.past + "\n"));
 }
 
@@ -421,13 +431,15 @@ void send_entry(const Entry &e)
 void send_cfg()
 {
     apply({"prog_ui", "cfg", S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0", std::to_string(S.daystart), day_of(time(nullptr)), std::to_string(S.bin),
-           S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past});
+           S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past,
+           S.chat_sound ? "1" : "0"});
 }
 
 void sync_book()
 {
     apply({"prog_ui", "reset", M.map, day_of(time(nullptr)), std::to_string(S.daystart), S.autofinish ? "1" : "0", S.saveat_here ? "1" : "0",
-           std::to_string(S.bin), S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past});
+           std::to_string(S.bin), S.zero_clock ? "1" : "0", S.autosave ? "1" : "0", std::to_string(S.filter), S.past,
+           S.chat_sound ? "1" : "0"});
     for (const Entry &e : M.e) send_entry(e);
     for (const Spot &s : M.s) apply({"prog_ui", "s", s.name, num(s.lo), num(s.hi)});
     for (const auto &p : M.t) apply({"prog_ui", "t", p.first, std::to_string((long)p.second)});
@@ -1321,7 +1333,7 @@ void pl_refetch_zones()
     {
         std::lock_guard<std::mutex> l(g_zmu);
         if (g_zones_server) {
-            cstv_chat_line((std::string(PREFIX) + "This server sends its own timer zones, so the zone list isn't used here (prog_debug shows them).").c_str());
+            say_line(std::string(PREFIX) + "This server sends its own timer zones, so the zone list isn't used here (prog_debug shows them).");
             return;
         }
         g_zone_status = "downloading again";
@@ -1329,7 +1341,7 @@ void pl_refetch_zones()
     g_fetch_map = M.map;
     plat_http_init();
     plat_thread(fetch_thread);
-    cstv_chat_line((std::string(PREFIX) + "Downloading this map's timer zones again (prog_debug shows the result).").c_str());
+    say_line(std::string(PREFIX) + "Downloading this map's timer zones again (prog_debug shows the result).");
 }
 
 // the book's `sm_progui ...` lines
@@ -1383,6 +1395,7 @@ void pl_command(const char *line)
         else if (a == "zero") S.zero_clock = n != 0;
         else if (a == "autosave") S.autosave = n != 0;
         else if (a == "filter") S.filter = n < 0 || n > 2 ? 0 : n;
+        else if (a == "chatsound") S.chat_sound = n != 0;
         else if (a == "bin") S.bin = n < 5 ? 5 : n > 60 ? 60 : n;
         save_settings();
         send_cfg();
@@ -1429,6 +1442,6 @@ void pl_debug()
              "alive %d | state %d track %d time %.2f | attempt %d from \"%s\" %.2f | trace %d best %d",
              M.map.c_str(), zs.c_str(), (int)g_dests.size(), NV.life, NV.flags, NV.vel, ok ? "ok" : "-", me.pos[0], me.pos[1], me.pos[2],
              me.alive, R.state, R.track, run_time(now), R.att, R.from.c_str(), R.ft, (int)R.trace.size(), (int)R.best.size());
-    cstv_chat_line(b);
+    say_line(b);
     if (FILE *f = fopen((dir_path() + SEP + "debug.txt").c_str(), "a")) { fprintf(f, "%s\n", b); fclose(f); }   // (the console log is often empty)
 }
